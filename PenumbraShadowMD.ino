@@ -136,6 +136,7 @@ bool invertTurnDirection = DEFAULT_INVERT_TURN_DIRECTION;
 byte domeAutoSpeed = DEFAULT_AUTO_DOME_SPEED;
 int time360DomeTurn = DEFAULT_AUTO_DOME_TURN_TIME;
 
+
 #define SHADOW_DEBUG(...)       //uncomment this for console DEBUG output
 //#define SHADOW_VERBOSE(...)   //uncomment this for console VERBOSE output
 
@@ -353,6 +354,48 @@ int maestroBaudRate = DEFAULT_MAESTRO_BAUD;
 #define CONSOLE_BUFFER_SIZE     300
 static unsigned sPos;
 static char sBuffer[CONSOLE_BUFFER_SIZE];
+
+// ---------------------------------------------------------------------------------------
+//                    NeoPixels on Pin 13
+// ---------------------------------------------------------------------------------------
+// ----- NeoPixel State -----
+#include <Adafruit_NeoPixel.h>        //Needed for the LED Control
+
+#define NEOPIXEL_PIN   13
+
+Adafruit_NeoPixel strip;
+bool neopixelEnabled = false;
+int neopixelCount    = 0;
+uint8_t neopixelR    = 0;
+uint8_t neopixelG    = 0;
+uint8_t neopixelB    = 0;
+
+// Initialize / reinitialize the strip
+void initNeoPixels(int count)
+{
+    if (count <= 0) {
+        strip.updateLength(0);
+        neopixelCount = 0;
+        return;
+    }
+
+    neopixelCount = count;
+    strip.updateLength(neopixelCount);
+    strip.setPin(NEOPIXEL_PIN);
+    strip.begin();
+    strip.show(); // clear
+}
+
+// Update strip with current color if enabled
+void refreshNeoPixels()
+{
+    if (!neopixelEnabled || neopixelCount == 0) return;
+
+    for (int i = 0; i < neopixelCount; i++) {
+        strip.setPixelColor(i, strip.Color(neopixelR, neopixelG, neopixelB));
+    }
+    strip.show();
+}
 
 // ---------------------------------------------------------------------------------------
 //                    Low-level Maestro helpers
@@ -658,8 +701,20 @@ void setup()
         time360DomeTurn = preferences.getInt(PREFERENCE_DOME_DOME_TURN_TIME, DEFAULT_AUTO_DOME_TURN_TIME);
         motorControllerBaudRate = preferences.getInt(PREFERENCE_MOTOR_BAUD, DEFAULT_MOTOR_BAUD);
         maestroBaudRate = preferences.getInt(PREFERENCE_MAESTRO_BAUD, DEFAULT_MAESTRO_BAUD);
+        
     }
 #endif
+    neopixelCount   = preferences.getInt("neocount", 0);
+    neopixelR       = preferences.getInt("neor", 0);
+    neopixelG       = preferences.getInt("neog", 0);
+    neopixelB       = preferences.getInt("neob", 0);
+    neopixelEnabled = preferences.getBool("neoenable", false);
+
+    if (neopixelCount > 0) {
+        initNeoPixels(neopixelCount);
+        refreshNeoPixels();
+    }
+
     PrintReelTwoInfo(Serial, "Penumbra Shadow MD");
 
     DEBUG_PRINTLN("Bluetooth Library Started");
@@ -690,34 +745,7 @@ void setup()
 
     SetupEvent::ready();
 
-#if defined(MARC_SOUND_PLAYER)
-    MarcSound::Module soundPlayer =
-        (MarcSound::Module)preferences.getInt(PREFERENCE_MARCSOUND, MARC_SOUND_PLAYER);
-
-    int soundStartup =
-        preferences.getInt(PREFERENCE_MARCSOUND_STARTUP, MARC_SOUND_STARTUP);
-
-    // Pick baud by module (all share the same SOUND_SERIAL pins from pin-map.h)
-    uint32_t soundBaud =
-        (soundPlayer == MarcSound::kMP3Trigger_UART) ? 38400 : 9600;
-
-    // (Re)open the shared sound UART at the correct baud
-    // NOTE: SOUND_SERIAL is SoftwareSerial per pin-map.h
-    SOUND_SERIAL.end();                       // safe even if not opened yet
-    SOUND_SERIAL_INIT(soundBaud);             // uses SOUND_SERIAL_RX/TX from pin-map.h
-
-    // Initialize the selected backend on that same stream
-    bool ok = sMarcSound.begin(soundPlayer, SOUND_SERIAL, soundStartup);
-    if (!ok) {
-        DEBUG_PRINTLN("FAILED TO INITALIZE SOUND MODULE");
-    }
-
-    // Preferences-driven volume (expects 0..1000 -> 0.0..1.0)
-    sMarcSound.setVolume(
-        preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, MARC_SOUND_VOLUME) / 1000.0f
-    );
-#endif
-
+    
 
     if (Usb.Init() == -1)
     {
@@ -725,12 +753,33 @@ void setup()
         while (1); //halt
     }
 #if defined(MARC_SOUND_PLAYER)
+    MarcSound::Module soundPlayer =
+        (MarcSound::Module)preferences.getInt(PREFERENCE_MARCSOUND, MARC_SOUND_PLAYER);
+    int soundStartup =
+        preferences.getInt(PREFERENCE_MARCSOUND_STARTUP, MARC_SOUND_STARTUP);
+
+    uint32_t soundBaud = (soundPlayer == MarcSound::kMP3Trigger_UART) ? 38400 : 9600;
+    SOUND_SERIAL.end();
+    SOUND_SERIAL_INIT(soundBaud);
+
+    bool ok = sMarcSound.begin(soundPlayer, SOUND_SERIAL, soundStartup);
+    if (!ok) {
+        DEBUG_PRINTLN("FAILED TO INITALIZE SOUND MODULE");
+    }
+
+    // ---- SINGLE, sane volume set here ----
+    int vol = preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, 850); // default mid-range
+    if (vol < 50) vol = 1000;                                        // guard against “silent” boots
+    sMarcSound.setVolume(vol / 1000.0f);
+
+    // Then use sounds
     sMarcSound.playStartSound();
     sMarcSound.setRandomMin(preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MIN, MARC_SOUND_RANDOM_MIN));
     sMarcSound.setRandomMax(preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MAX, MARC_SOUND_RANDOM_MAX));
     if (preferences.getBool(PREFERENCE_MARCSOUND_RANDOM, MARC_SOUND_RANDOM))
         sMarcSound.startRandomInSeconds(13);
 #endif
+
 }
 
 void sendMarcCommand(const char* cmd)
@@ -843,7 +892,7 @@ void loop()
     if (Serial.available())
     {
         int ch = Serial.read();
-        MAESTRO_SERIAL.print((char)ch);
+
         if (ch == 0x0A || ch == 0x0D)
         {
             char* cmd = sBuffer;
@@ -880,88 +929,87 @@ void loop()
             }
             else if (startswith(cmd, "#SMVOLUME"))
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                if (val > 1000)
-                {
-                    printf("Value out of range. 0 - 1000\n");
-                }
-                else
-                {
-                    preferences.putInt(PREFERENCE_MARCSOUND_VOLUME, val);
-                    printf("Sound Volume: %d\n", val);
-                    sMarcSound.setVolume(1000.0 / val);
-                }
+                long v = (long)strtolu(cmd, &cmd);     // 0..1000
+                if (v < 0)    v = 0;
+                if (v > 1000) v = 1000;
+
+                preferences.putInt(PREFERENCE_MARCSOUND_VOLUME, (int)v);
+
+                // Linear mapping: 0..1000 -> 0.0..1.0
+                sMarcSound.setVolume(v / 1000.0f);
+
+                printf("Sound Volume: %ld (%.0f%%)\n", v, (v / 10.0f));
             }
+
             else if (startswith(cmd, "#SMSOUND"))
-{
-    // After startswith(...), some of your code paths leave `cmd` at:
-    //   A) just after "#SMSOUND"  (common in this project), OR
-    //   B) at the start of "#SMSOUND" (if startswith didn't advance).
-    //
-    // Normalize: if we still see the literal, skip it once.
-    if (strncasecmp(cmd, "#SMSOUND", 8) == 0) {
-        cmd += 8;
-    }
+            {
+                // After startswith(...), some of your code paths leave `cmd` at:
+                //   A) just after "#SMSOUND"  (common in this project), OR
+                //   B) at the start of "#SMSOUND" (if startswith didn't advance).
+                //
+                // Normalize: if we still see the literal, skip it once.
+                if (strncasecmp(cmd, "#SMSOUND", 8) == 0) {
+                    cmd += 8;
+                }
 
-    // Allow optional whitespace between token and the number
-    while (*cmd == ' ' || *cmd == '\t') ++cmd;
+                // Allow optional whitespace between token and the number
+                while (*cmd == ' ' || *cmd == '\t') ++cmd;
 
-    // Must have at least one digit (0..3)
-    if (!isdigit((unsigned char)*cmd)) {
-        printf("Usage: #SMSOUND0 | #SMSOUND1 | #SMSOUND2 | #SMSOUND3\n");
-        // Move past any non-digit junk to avoid re-triggering on the same spot
-        while (*cmd && *cmd != ',' && *cmd != '\n' && *cmd != '\r') ++cmd;
-        // If you parse comma-separated commands, skip one comma
-        if (*cmd == ',') ++cmd;
-    } else {
-        // Parse the numeric choice and advance cmd to the end of the number
-        char* endp = nullptr;
-        long choice = strtol(cmd, &endp, 10);
-        cmd = endp; // IMPORTANT: advance outer parser
+                // Must have at least one digit (0..3)
+                if (!isdigit((unsigned char)*cmd)) {
+                    printf("Usage: #SMSOUND0 | #SMSOUND1 | #SMSOUND2 | #SMSOUND3\n");
+                    // Move past any non-digit junk to avoid re-triggering on the same spot
+                    while (*cmd && *cmd != ',' && *cmd != '\n' && *cmd != '\r') ++cmd;
+                    // If you parse comma-separated commands, skip one comma
+                    if (*cmd == ',') ++cmd;
+                } else {
+                    // Parse the numeric choice and advance cmd to the end of the number
+                    char* endp = nullptr;
+                    long choice = strtol(cmd, &endp, 10);
+                    cmd = endp; // IMPORTANT: advance outer parser
 
-        MarcSound::Module mod  = MarcSound::fromChoice((int)choice);  // 0..3 -> module
-        uint32_t          baud = MarcSound::baudFor(mod);             // 0, 9600, 38400
+                    MarcSound::Module mod  = MarcSound::fromChoice((int)choice);  // 0..3 -> module
+                    uint32_t          baud = MarcSound::baudFor(mod);             // 0, 9600, 38400
 
-        // Persist selection
-        preferences.putInt(PREFERENCE_MARCSOUND, (int)mod);
+                    // Persist selection
+                    preferences.putInt(PREFERENCE_MARCSOUND, (int)mod);
 
-        // Apply immediately
-        sMarcSound.end();
-        SOUND_SERIAL.end();
+                    // Apply immediately
+                    sMarcSound.end();
+                    SOUND_SERIAL.end();
 
-        if (baud == 0) {
-            printf("Sound Disabled.\n");
-        } else {
-            SOUND_SERIAL_INIT(baud); // pins/mode from pin-map.h
+                    if (baud == 0) {
+                        printf("Sound Disabled.\n");
+                    } else {
+                        SOUND_SERIAL_INIT(baud); // pins/mode from pin-map.h
 
-            int startup = preferences.getInt(PREFERENCE_MARCSOUND_STARTUP, MARC_SOUND_STARTUP);
-            if (!sMarcSound.begin(mod, SOUND_SERIAL, startup)) {
-                printf("FAILED TO INITIALIZE SOUND MODULE: %s (baud=%lu)\n",
-                       MarcSound::moduleName(mod), (unsigned long)baud);
-            } else {
-                // Re-apply prefs
-                sMarcSound.setVolume(
-                    preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, MARC_SOUND_VOLUME) / 1000.0f
-                );
-                sMarcSound.setRandomMin(
-                    preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MIN, MARC_SOUND_RANDOM_MIN)
-                );
-                sMarcSound.setRandomMax(
-                    preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MAX, MARC_SOUND_RANDOM_MAX)
-                );
-                if (preferences.getBool(PREFERENCE_MARCSOUND_RANDOM, MARC_SOUND_RANDOM))
-                    sMarcSound.startRandomInSeconds(13);
+                        int startup = preferences.getInt(PREFERENCE_MARCSOUND_STARTUP, MARC_SOUND_STARTUP);
+                        if (!sMarcSound.begin(mod, SOUND_SERIAL, startup)) {
+                            printf("FAILED TO INITIALIZE SOUND MODULE: %s (baud=%lu)\n",
+                                MarcSound::moduleName(mod), (unsigned long)baud);
+                        } else {
+                            // Re-apply prefs
+                            sMarcSound.setVolume(
+                                preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, MARC_SOUND_VOLUME) / 1000.0f
+                            );
+                            sMarcSound.setRandomMin(
+                                preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MIN, MARC_SOUND_RANDOM_MIN)
+                            );
+                            sMarcSound.setRandomMax(
+                                preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MAX, MARC_SOUND_RANDOM_MAX)
+                            );
+                            if (preferences.getBool(PREFERENCE_MARCSOUND_RANDOM, MARC_SOUND_RANDOM))
+                                sMarcSound.startRandomInSeconds(13);
+                        }
+                    }
+
+                    printf("Sound module set to: %s (%lu baud)\n",
+                        MarcSound::moduleName(mod), (unsigned long)baud);
+
+                    // Optional: skip a trailing comma so the next command parses
+                    if (*cmd == ',') ++cmd;
+                }
             }
-        }
-
-        printf("Sound module set to: %s (%lu baud)\n",
-               MarcSound::moduleName(mod), (unsigned long)baud);
-
-        // Optional: skip a trailing comma so the next command parses
-        if (*cmd == ',') ++cmd;
-    }
-}
-
             else if (startswith(cmd, "#SMCONFIG"))
             {
                 // Current sound settings
@@ -972,7 +1020,7 @@ void loop()
                 int rmin  = preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MIN, MARC_SOUND_RANDOM_MIN);
                 int rmax  = preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MAX, MARC_SOUND_RANDOM_MAX);
 
-                printf("Configuration\n");
+                printf("\nConfiguration\n");
                 printf("-----------------------------------\n");
 
                 // Sound section
@@ -999,6 +1047,13 @@ void loop()
                 // Serial rates
                 printf("Maestro Baud:     %6d (#SMMARCBAUD)\n", maestroBaudRate);
                 printf("Motor Baud:       %6d (#SMMOTORBAUD)\n", motorControllerBaudRate);
+               
+                // NeoPixel settings
+                printf("NeoPixels Enabled:   %3d (#SMNEOON/#SMNEOOFF)\n", neopixelEnabled ? 1 : 0);
+                printf("NeoPixel Count:      %3d (#SMNEOCOUNT)\n", neopixelCount);
+                printf("NeoPixel Color:   R=%3d G=%3d B=%3d (#SMNEOCOLOR <r> <g> <b>)\n",
+                    neopixelR, neopixelG, neopixelB);
+
             }
             else if (startswith(cmd, "#SMSTARTUP"))
             {
@@ -1301,6 +1356,51 @@ void loop()
             {
                 printSMHelp();
             }
+            else if (startswith(cmd, "#SMNEOCOUNT"))
+            {
+                uint32_t val = strtolu(cmd, &cmd);
+                if (val > 300) { // safety limit
+                    printf("Too many NeoPixels (max 300).\n");
+                } else {
+                    initNeoPixels(val);
+                    preferences.putInt("neocount", val);
+                    printf("NeoPixel count set to %d\n", neopixelCount);
+                    refreshNeoPixels();
+                }
+            }
+            else if (startswith(cmd, "#SMNEOCOLOR"))
+            {
+                uint32_t r = strtolu(cmd, &cmd);
+                uint32_t g = strtolu(cmd, &cmd);
+                uint32_t b = strtolu(cmd, &cmd);
+
+                if (r > 255 || g > 255 || b > 255) {
+                    printf("RGB values must be 0–255\n");
+                } else {
+                    neopixelR = r; neopixelG = g; neopixelB = b;
+                    preferences.putInt("neor", neopixelR);
+                    preferences.putInt("neog", neopixelG);
+                    preferences.putInt("neob", neopixelB);
+                    printf("NeoPixel color set to R=%d G=%d B=%d\n", neopixelR, neopixelG, neopixelB);
+                    refreshNeoPixels();
+                }
+            }
+            else if (startswith(cmd, "#SMNEOON"))
+            {
+                neopixelEnabled = true;
+                preferences.putBool("neoenable", true);
+                printf("NeoPixels enabled.\n");
+                refreshNeoPixels();
+            }
+            else if (startswith(cmd, "#SMNEOOFF"))
+            {
+                neopixelEnabled = false;
+                preferences.putBool("neoenable", false);
+                printf("NeoPixels disabled.\n");
+                strip.clear();
+                strip.show();
+            }
+
             else
             {
                 printf("Unknown: %s\n", sBuffer);
