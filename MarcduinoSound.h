@@ -1,632 +1,447 @@
+#pragma once
+#include <Arduino.h>
 #include "DFRobotDFPlayerMini.h"
-/***********************************************************
- *  MP3sound.c
- *  MarcDuino interface to play sounds from an MP3Trigger board
+
+/*
+ * MarcduinoSound.h  —  Penumbra (MarcDuino-less) sound driver
  *
- *  Created on: Sep 17, 2013
- *  Author: Marc Verdiell
- *  Copyright � 2013 Marc Verdiell, All Rights Reserved
+ * Provides three UART back-ends:
+ *   - DFPlayer Mini (UART)
+ *   - DY-SV5W (UART 9600 8N1)
+ *   - SparkFun MP3 Trigger (UART 38400 8N1, default TX=14, RX=35)
  *
- ***********************************************************/
-/***********************************************************
- *  On the MP3, there are a maximum of 255 sound files
- *  They must be named NNN-xxxx.mp3
- *  Where NNN = 001 to 255
- *  The numbering ranges are predetermined, 25 sounds per
- *  bank category
- *       Bank 1: gen sounds, numbered 001 to 025
- *       Bank 2: chat sounds, numbered 026 to 050
- *       Bank 3: happy sounds, numbered 051 to 075
- *       Bank 4: sad sounds, numbered 076 to 100
- *       Bank 5: whistle sounds, numbered 101 to 125
- *       Bank 6: scream sounds, numbered 126 to 150
- *       Bank 7: Leia sounds, numbered 151 to 175
- *       Bank 8: sing sounds (deprecated, not used by R2 Touch)
- *       Bank 9: mus sounds, numbered 176 to 181
+ * Backward compatibility:
+ *   - Keeps $-style command parser used in the sketch
+ *   - Adds legacy enum aliases: kDFMini, kMP3Trigger, kHCR
+ *   - Adds begin(Module, Stream&, int) dispatcher (no duplicate legacy cases)
+ *   - Adds setRandomMin/Max used by preferences code
  *
- *  The pre-made R2 sound library contains only a few non-copyrighted music sounds.
- *  Sound 202, 203 and 205 are "beeped music" place-holders, meant to be replaced with the
- *  original score of Star Wars, Empire March, and Cantina respectively
+ * Convenience for #SMSOUND:
+ *   - fromChoice(int 0..3) → Module
+ *   - baudFor(Module)      → 0(disabled), 9600, 38400
+ *   - moduleName(Module)   → const char*
+ *   - end(), isEnabled()
  *
- *  If you add your own sounds in Bank 9, make sure you update the last variable
- *  MP3_BANK9_SOUNDS below to reflect the total number of sounds
- *
- ***********************************************************/
-#define MP3_MAX_BANKS                9  // nine banks
-#define MP3_MAX_SOUNDS_PER_BANK     25  // no more than 25 sound in each
-#define MP3_BANK_CUTOFF             4   // cutoff for banks that play "next" sound on $x
-
-// for the random sounds, needs to know max sounds of first 5 banks
-// only important for sounds below cutoff
-#define MP3_BANK1_SOUNDS 19 // gen sounds, numbered 001 to 025
-#define MP3_BANK2_SOUNDS 18 // chat sounds, numbered 026 to 050
-#define MP3_BANK3_SOUNDS 7  // happy sounds, numbered 051 to 075
-#define MP3_BANK4_SOUNDS 4  // sad sounds, numbered 076 to 100
-#define MP3_BANK5_SOUNDS 3  // whistle sounds, numbered 101 to 125
-// unless you change bank cutoff, these are ignored, so I set them to max
-#define MP3_BANK6_SOUNDS MP3_MAX_SOUNDS_PER_BANK    // scream sounds, numbered 126 to 150
-#define MP3_BANK7_SOUNDS MP3_MAX_SOUNDS_PER_BANK    // Leia sounds, numbered 151 to 175
-#define MP3_BANK8_SOUNDS MP3_MAX_SOUNDS_PER_BANK    // sing sounds (deprecated, not used by R2 Touch)
-#define MP3_BANK9_SOUNDS MP3_MAX_SOUNDS_PER_BANK // mus sounds, numbered 201 t0 225
-
-// this defines where the startup sound is
-#define MP3_EMPTY_SOUND 252 // workaround, used to stop sounds
-
-// Defines for the Volume control
-// DFPlayer Mini has a different set of values used.
-#define DF_VOLUME_MID   15  // guessing mid volume 32 is right in-between...
-#define DF_VOLUME_MIN   1   // doc says anything below 64 is inaudible, not true, 100 is. 82 is another good value
-#define DF_VOLUME_MAX   30  // doc says max is 0
-#define DF_VOLUME_OFF   0 // to turn it off... 255 gets a buzz.
-
-// Defines for the SparkFun MP3 Trigger
-#define MP3_VOLUME_MID  50  // guessing mid volume 32 is right in-between...
-#define MP3_VOLUME_MIN  100 // doc says anything below 64 is inaudible, not true, 100 is. 82 is another good value
-#define MP3_VOLUME_MAX  0   // doc says max is 0
-#define MP3_VOLUME_OFF  254 // to turn it off... 255 gets a buzz.
-
-#define MP3_VOLUME_STEPS 20 // R2 Touch app has 20 steps from min to max
-
-#define MP3_PLAY_CMD    't' // command to play sound file on the MP3 trigger
-#define MP3_VOLUME_CMD  'v' // command to play sound file on the MP3 trigger
-#define MP3_STOP_CMD    'O' // command to stop/play  - not used
-
-#define MP3_MIN_RANDOM_PAUSE 600        // min wait on random sounds
-#define MP3_MAX_RANDOM_PAUSE 10000      // max wait on random sounds
-#define MP3_MAX_PAUSE_ON_RESUME 12      // default wait to resume random. Works for short sound. Set mp3_random_timer manually for long ones.
+ * IMPORTANT:
+ *   - No MarcDuino/HCR traffic is sent anywhere.
+ *   - Put ONE definition in your .ino:   MarcSound sMarcSound;
+ */
 
 #ifndef SOUND_DEBUG
-#define SOUND_DEBUG(...)
+  #define SOUND_DEBUG(...) do{}while(0)
 #endif
 
-/////////////COMMAND VOCABULARY///////////
-// Play sound command by bank/sound numbers
-// $xyy
-// x=bank number
-// yy=sound number. If none, next sound is played in the bank
-//
-// Other commands
-// $c
-// where c is a command character
-// R - random from 4 first banks
-// O - sound off
-// L - Leia message (bank 7 sound 1)
-// C - Cantina music (bank 9 sound 5)
-// c - Beep cantina (bank 9 sound 1)
-// S - Scream (bank 6 sound 1)
-// F - Faint/Short Circuit (bank 6 sound 3)
-// D - Disco (bank 9 sound 6)
-// s - stop sounds
-// + - volume up
-// - - volume down
-// m - volume mid
-// f - volume max
-// p - volume min
-// W - Star Wars music (bank 9 sound 2)
-// M - Imperial March (bank 9 sound 3)
-//
-///////////////////////////////////////////////
+// --------------------------
+// Library-level configuration
+// --------------------------
+#define MP3_MAX_BANKS                9
+#define MP3_MAX_SOUNDS_PER_BANK     25
+#define MP3_BANK_CUTOFF             4   // banks <= this advance "next" on 0
+
+// Per-bank sizes for random (adjust to your library)
+#define MP3_BANK1_SOUNDS 19
+#define MP3_BANK2_SOUNDS 18
+#define MP3_BANK3_SOUNDS 7
+#define MP3_BANK4_SOUNDS 4
+#define MP3_BANK5_SOUNDS 3
+#define MP3_BANK6_SOUNDS MP3_MAX_SOUNDS_PER_BANK
+#define MP3_BANK7_SOUNDS MP3_MAX_SOUNDS_PER_BANK
+#define MP3_BANK8_SOUNDS MP3_MAX_SOUNDS_PER_BANK
+#define MP3_BANK9_SOUNDS MP3_MAX_SOUNDS_PER_BANK
+
+// DFPlayer Mini volume scale
+#define DF_VOLUME_MAX   30
+#define DF_VOLUME_MIN   1
+
+// SparkFun MP3 Trigger defaults
+#define MP3TRIG_BAUD    38400  // from SparkFun docs
+#define MP3TRIG_DEF_TX  14     // ESP32 pin request by user
+#define MP3TRIG_DEF_RX  35     // ESP32 pin request by user
+
+// DY-SV5W defaults
+#define DYSV5W_BAUD     9600   // from DY-SV5W datasheet
+
+// Random timing
+#define MP3_VOLUME_STEPS 20
+#define MP3_MIN_RANDOM_PAUSE 600
+#define MP3_MAX_RANDOM_PAUSE 10000
+#define MP3_MAX_PAUSE_ON_RESUME 12
 
 class MarcSound
 {
 public:
-    enum Module
-    {
-        kDisabled,
-        kMP3Trigger,
-        kDFMini,
-        kHCR
+    // -------------------- Back-end selection --------------------
+    enum Module {
+        kDisabled = 0,
+        kDFMini_UART,
+        kDY_SV5W_UART,
+        kMP3Trigger_UART
     };
 
-    void idle()
-    {
-        if (fModule != kDisabled)
-        {
-            uint32_t currentMillis = millis();
-            if (fRandomEnabled && fNextRandomEvent && currentMillis >= fNextRandomEvent)
-            {
-                playRandom();
-                fNextRandomEvent = millis() + random(fRandomMinDelay, fRandomMaxDelay);
-            }
+    // -------- Legacy enum aliases so existing code compiles unchanged --------
+    static constexpr Module kDFMini     = kDFMini_UART;      // old name -> new
+    static constexpr Module kMP3Trigger = kMP3Trigger_UART;  // old name -> new
+    static constexpr Module kHCR        = kDY_SV5W_UART;     // Penumbra used "HCR" for non-DF UART
+
+    MarcSound() : fModule(kDisabled) { resetBankIndexes(); }
+
+    // -------------------- Helpers for #SMSOUND --------------------
+    // Map 0..3 from UI to Module (0:Disabled, 1:MP3 Trigger, 2:DFMini, 3:DY-SV5W/HCR)
+    static Module fromChoice(int choice) {
+        switch (choice) {
+            case 1: return kMP3Trigger_UART;
+            case 2: return kDFMini_UART;
+            case 3: return kDY_SV5W_UART;
+            default: return kDisabled;
         }
     }
 
-    void setRandomMin(uint32_t delay)
-    {
-        fRandomMinDelay = delay;
-    }
-
-    void setRandomMax(uint32_t delay)
-    {
-        fRandomMaxDelay = delay;
-    }
-
-    void playSound(uint8_t bank, uint8_t sound)
-    {
-        uint8_t filenum;
-
-        if (bank > MP3_MAX_BANKS)
-            return;
-        if (bank != 0 && sound > MP3_MAX_SOUNDS_PER_BANK)
-            return;
-
-        // if bank=0 play the sound number provided
-        if (bank == 0)
-            filenum = sound;
-
-        else if (sound != 0)
-        {
-            // calculate actual file number on the MP3 memory card
-            filenum = (bank - 1) * MP3_MAX_SOUNDS_PER_BANK + sound;
-            // also adjust last sound played index for the next sound command
-            // make sure not to go past max sounds
-            if (sound > fMaxSounds[bank])
-                fBankIndexes[bank] = fMaxSounds[bank];
-            else
-                fBankIndexes[bank] = sound;
-        }
-        // sound "0", play first or next sound depending on bank
-        else
-        {
-            if (bank <= MP3_BANK_CUTOFF)
-            {
-                // advance index, rewind to first sound if at end
-                if ((++fBankIndexes[bank]) > fMaxSounds[bank])
-                    fBankIndexes[bank] = 1;
-                // we'll play the new indexed sound
-                sound = fBankIndexes[bank];
-            }
-            else
-            {
-                // for banks that always play the first sound
-                sound = 1;
-            }
-            filenum = (bank - 1) * MP3_MAX_SOUNDS_PER_BANK + sound;
-        }
-
-        switch (fModule)
-        {
-            case kDisabled:
-                break;
-            case kDFMini:
-                fDFMini.play(filenum);
-                break;
-            case kMP3Trigger:
-                // send a 't'nnn number where nnn=file number
-                SOUND_SERIAL.write(MP3_PLAY_CMD);
-                SOUND_SERIAL.write(filenum);
-                break;
-            case kHCR:
-            {
-                char buffer[10];
-                snprintf(buffer, sizeof(buffer), "<CA%04d>", filenum);
-                switch (bank)
-                {
-                    case kGenSounds:
-                        sendHCR("<SS0>");
-                        break;
-                    case kChatSounds:
-                        sendHCR("<MM>");
-                        break;
-                    case kHappySounds:
-                        if (filenum < fMaxSounds[bank] / 2)
-                            sendHCR("<SH0>");
-                        else
-                            sendHCR("<SH1>");
-                        break;
-                    case kSadSounds:
-                        if (filenum < fMaxSounds[bank] / 2)
-                            sendHCR("<SS0>");
-                        else
-                            sendHCR("<SS1>");
-                        break;
-                    case kWhistleSounds:
-                        sendHCR("<MM>");
-                        break;
-                    case kScreamSounds:
-                        switch (sound)
-                        {
-                            case 1:
-                                sendHCR("<SC0>");
-                                break;
-                            case 2:
-                                sendHCR("<SC1>");
-                                break;
-                            case 3:
-                            default:
-                                sendHCR("<SE>");
-                                break;
-                        }
-                        break;
-                    case 0:
-                    case kLeiaSounds:
-                    case kSingSounds:
-                    case kMusicSounds:
-                        sendHCR(buffer);
-                        break;
-                }
-                break;
-            }
+    // Report the UART baud required for a module (use to reopen SOUND_SERIAL correctly)
+    static uint32_t baudFor(Module m) {
+        switch (m) {
+            case kMP3Trigger_UART: return MP3TRIG_BAUD; // 38400
+            case kDFMini_UART:
+            case kDY_SV5W_UART:    return DYSV5W_BAUD;  // 9600
+            default:               return 0;            // disabled / none
         }
     }
 
-    void playRandom()
-    {
-        if (fModule == kHCR)
-        {
-            sendHCR("<MM>");
-            return;
-        }
-        uint8_t num;
-        // Plays a random sound from the first 5 banks only
-        num = random(1, MP3_BANK1_SOUNDS + MP3_BANK2_SOUNDS + MP3_BANK3_SOUNDS + MP3_BANK4_SOUNDS + MP3_BANK5_SOUNDS);
-        if(num <= MP3_BANK1_SOUNDS)
-        {
-            playSound(1, num);
-            return;
-        }
-        num -= MP3_BANK1_SOUNDS;
-        if (num <= MP3_BANK2_SOUNDS)
-        {
-            playSound(2, num);
-            return;
-        }
-        num -= MP3_BANK2_SOUNDS;
-        if (num <= MP3_BANK3_SOUNDS)
-        {
-            playSound(3, num);
-            return;
-        }
-        num -= MP3_BANK3_SOUNDS;
-        if (num <= MP3_BANK4_SOUNDS)
-        {
-            playSound(4, num);
-            return;
-        }
-        num -= MP3_BANK4_SOUNDS;
-        if (num <= MP3_BANK5_SOUNDS)
-        {
-            playSound(5, num);
-            return;
+    // Human-readable name (for #SMSTATUS or diagnostics)
+    static const char* moduleName(Module m) {
+        switch (m) {
+            case kMP3Trigger_UART: return "MP3 Trigger";
+            case kDFMini_UART:     return "DFMini Player";
+            case kDY_SV5W_UART:    return "HCR Vocalizer (DY-SV5W)";
+            default:               return "Disabled";
         }
     }
 
-    void playStartSound()
-    {
-        if (fStartupSound != -1)
-            playSound(0, fStartupSound);
+    bool isEnabled() const { return fModule != kDisabled; }
+
+    // Stop and detach (lets you safely re-begin with a different backend)
+    void end() {
+        stop();
+        fDFSerial   = nullptr;
+        fDYSerial   = nullptr;
+        fTrigSerial = nullptr;
+        fModule     = kDisabled;
     }
 
-    void stop()
-    {
-        switch (fModule)
-        {
-            case kDisabled:
-                break;
-            case kDFMini:
-                fDFMini.stop();
-                break;
-            case kMP3Trigger:
-                playSound(0, MP3_EMPTY_SOUND);
-                break;
-            case kHCR:
-                sendHCR("<PSG>");
-                break;
-        }
-    }
+    // -------------------- Begin() overloads --------------------
 
-    inline void startRandom()
-    {
-        startRandomInSeconds(1);
-    }
-
-    void startRandomInSeconds(uint32_t seconds)
-    {
-        fRandomEnabled = true;
-        fNextRandomEvent = millis() + seconds * 1000L;
-    }
-
-    void stopRandom()
-    {
-        fRandomEnabledSaved = false;
-        fRandomEnabled = false;
-    }
-
-    void suspendRandom()
-    {
-        fRandomEnabledSaved = fRandomEnabled;
-        fRandomEnabled = false;
-    }
-
-    void resumeRandomInSeconds(uint32_t seconds)
-    {
-        fRandomEnabled = fRandomEnabledSaved;
-        if (fRandomEnabled)
-            fNextRandomEvent = millis() + seconds * 1000L;
-    }
-
-    inline void resumeRandom()
-    {
-        resumeRandomInSeconds(MP3_MAX_PAUSE_ON_RESUME);
-    }
-
-    void volumeMid()
-    {
-        setVolume(0.5);
-    }
-
-    void volumeOff()
-    {
-        setVolume(0.0);
-    }
-
-    void volumeMax()
-    {
-        setVolume(1.0);
-    }
-
-    void volumeMin()
-    {
-        setVolume(0.01);
-    }
-
-    void volumeUp()
-    {
-        setVolume(fVolume + (1.0 / MP3_VOLUME_STEPS));
-    }
-
-    void volumeDown()
-    {
-        setVolume(fVolume - (1.0 / MP3_VOLUME_STEPS));
-    }
-
-    void setVolume(float volume)
-    {
-        // clamp value to 0.0 - 1.0
-        volume = std::min<float>(volume, 1.0);
-        volume = std::max<float>(volume, 0.0);
-        fVolume = volume;
-        switch (fModule)
-        {
-            case kDisabled:
-                break;
-            case kDFMini:
-                fDFMini.volume(ceil(volume * DF_VOLUME_MAX));
-                break;
-            case kMP3Trigger:
-                sendMP3(MP3_VOLUME_CMD);
-                sendMP3(MP3_VOLUME_MIN - volume * MP3_VOLUME_MIN);
-                break;
-            case kHCR:
-            {
-                char buffer[30];
-                snprintf(buffer, sizeof(buffer), "<PVV100><PVA%d><PVB%d>", int(volume * 100), int(volume * 100));
-                sendHCR(buffer);
-                break;
-            }
-        }
-    }
-
-    bool begin(Module module, Stream& stream, int startupSound = -1)
-    {
+    // DFPlayer Mini (UART)
+    bool beginDFPlayer(Stream& serial, int startupSound = -1) {
         fModule = kDisabled;
         fStartupSound = startupSound;
-        switch (module)
-        {
-            case kDisabled:
-                fStream = nullptr;
-                break;
-            case kDFMini:
-                fStream = &stream;
-                if (!fDFMini.begin(stream))
-                {
-                    DEBUG_PRINTLN("Unable to begin:");
-                    DEBUG_PRINTLN("1.Please recheck the connection!");
-                    DEBUG_PRINTLN("2.Please insert the SD card!");
-                    DEBUG_PRINTLN("2.Reboot!");
-                    return false;
-                }
-                fDFMini.EQ(DFPLAYER_EQ_NORMAL);
-                break;
-            case kMP3Trigger:
-                fStream = &stream;
-                break;
-            case kHCR:
-                fStream = &stream;
-                sendHCR("<M0>");
-                sendHCR("<M0>");
-                break;
+        fDFSerial = &serial;
+        if (!fDFMini.begin(serial)) {
+            SOUND_DEBUG("DFMini: begin() failed\n");
+            return false;
         }
-        for (uint8_t i=0; i < SizeOfArray(fBankIndexes); i++)
-        {
-            fBankIndexes[i] = 0;
-        }
-        fModule = module;
+        fDFMini.EQ(DFPLAYER_EQ_NORMAL);
+        resetBankIndexes();
+        fModule = kDFMini_UART;
         return true;
     }
 
-    bool handleCommand(const char* cmd, bool skipStart = false)
-    {
-        ////////////////////////////////////////////////
-        // Play sound command by bank/sound numbers
-        // $xyy
-        // x=bank number
-        // yy=sound number. If none, next sound is played in the bank
-        //
-        // Other commands
-        // $c
-        // where c is a command character
-        // R - random from 4 first banks
-        // O - sound off
-        // L - Leia message (bank 7 sound 1)
-        // C - Cantina music (bank 9 sound 5)
-        // c - Beep cantina (bank 9 sound 1)
-        // S - Scream (bank 6 sound 1)
-        // F - Faint/Short Circuit (bank 6 sound 3)
-        // D - Disco (bank 9 sound 6)
-        // s - stop sounds
-        // + - volume up
-        // - - volume down
-        // m - volume mid
-        // f - volume max
-        // p - volume min
-        // W - Star Wars music (bank 9 sound 2)
-        // M - Imperial March (bank 9 sound 3)
-        //
-        ///////////////////////////////////////////////
-        if (skipStart)
-            cmd--;
-        uint8_t len = strlen(cmd);
-        // check the start character
-        if (!skipStart && cmd[0] != '$')
-            return false;
+    // DY-SV5W (UART 9600 8N1)
+    bool beginDYSV5W(Stream& serial, int startupSound = -1) {
+        fModule = kDisabled;
+        fStartupSound = startupSound;
+        fDYSerial = &serial;
+        resetBankIndexes();
+        fModule = kDY_SV5W_UART;
+        return true;
+    }
 
-        // should have between 2 and 4 characters
-        if (len<2 || len>4)
-        {
-            return false;
+    // SparkFun MP3 Trigger (UART) — convenience for ESP32 Serial2 on TX=14, RX=35
+    bool beginMP3Trigger(HardwareSerial& hw = Serial2,
+                         int txPin = MP3TRIG_DEF_TX,
+                         int rxPin = MP3TRIG_DEF_RX,
+                         int startupSound = -1)
+    {
+    #if defined(ARDUINO_ARCH_ESP32)
+        hw.begin(MP3TRIG_BAUD, SERIAL_8N1, rxPin, txPin);
+    #else
+        (void)txPin; (void)rxPin; // not used on non-ESP32
+        hw.begin(MP3TRIG_BAUD);
+    #endif
+        return beginMP3Trigger((Stream&)hw, startupSound);
+    }
+
+    // SparkFun MP3 Trigger with any Stream
+    bool beginMP3Trigger(Stream& serial, int startupSound = -1) {
+        fModule = kDisabled;
+        fStartupSound = startupSound;
+        fTrigSerial = &serial;
+        resetBankIndexes();
+        fModule = kMP3Trigger_UART;
+        return true;
+    }
+
+    // -------- Back-compat dispatcher: begin(Module, Stream&, startupSound) --------
+    // Note: legacy aliases resolve to the same underlying values as the canonical enums,
+    // so we do NOT repeat legacy cases to avoid duplicate case labels.
+    bool begin(Module module, Stream& serial, int startupSound = -1) {
+      switch (module) {
+        case kDFMini_UART:     return beginDFPlayer(serial, startupSound);
+        case kDY_SV5W_UART:    return beginDYSV5W(serial, startupSound);
+        case kMP3Trigger_UART: return beginMP3Trigger(serial, startupSound);
+        default:               return false;
+      }
+    }
+
+    // -------------------- Periodic --------------------
+    void idle() {
+        if (fModule == kDisabled) return;
+        uint32_t now = millis();
+        if (fRandomEnabled && fNextRandomEvent && now >= fNextRandomEvent) {
+            playRandom();
+            fNextRandomEvent = millis() + random(fRandomMinDelay, fRandomMaxDelay);
+        }
+    }
+
+    // -------------------- Core controls --------------------
+    void playStartSound() {
+        if (fStartupSound != -1) playSound(0, fStartupSound);
+    }
+
+    void stop() {
+        switch (fModule) {
+            case kDisabled: break;
+            case kDFMini_UART:     fDFMini.stop(); break;
+            case kDY_SV5W_UART:    dy_cmd_stop();  break;
+            case kMP3Trigger_UART: trig_cmd_stop(); break;
+        }
+    }
+
+    // bank/sound => flattened track number (1..225)
+    void playSound(uint8_t bank, uint8_t sound) {
+        if (bank > MP3_MAX_BANKS) return;
+        if (bank != 0 && sound > MP3_MAX_SOUNDS_PER_BANK) return;
+
+        uint16_t fileNum = 0;
+        if (bank == 0) {
+            fileNum = sound; // direct (already 1-based)
+        } else if (sound != 0) {
+            fileNum = (bank - 1) * MP3_MAX_SOUNDS_PER_BANK + sound;
+            fBankIndexes[bank] = min<uint8_t>(sound, fMaxSounds[bank]);
+        } else {
+            if (bank <= MP3_BANK_CUTOFF) {
+                if ((++fBankIndexes[bank]) > fMaxSounds[bank]) fBankIndexes[bank] = 1;
+                sound = fBankIndexes[bank];
+            } else {
+                sound = 1;
+            }
+            fileNum = (bank - 1) * MP3_MAX_SOUNDS_PER_BANK + sound;
         }
 
-        char cmdch = cmd[1];
+        switch (fModule) {
+            case kDisabled: return;
 
-        // if the command character is a digit, this is a sound play command
-        if (isdigit(cmdch))
-        {
-            stopRandom(); // any manual sound command stops random automatically
-            uint8_t bank = (uint8_t)cmdch - '0';
-            uint8_t sound = 0;
-            if (len > 2)
-            {
-                sound = atoi(cmd + 2);
-            }
+            case kDFMini_UART:
+                // DFPlayer: 1-based track in root
+                fDFMini.play(fileNum);
+                return;
+
+            case kDY_SV5W_UART:
+                // DY-SV5W: "play specified music" supports 1..65535
+                dy_cmd_playTrack(fileNum);
+                return;
+
+            case kMP3Trigger_UART:
+                // MP3 Trigger binary 't' command expects 0..255 index; map 1..225 -> 0..224
+                if (fileNum > 0) trig_cmd_playBinary((uint8_t)(fileNum - 1));
+                return;
+        }
+    }
+
+    // -------------------- Randomization --------------------
+    void playRandom() {
+        if (fModule == kDisabled) return;
+        uint8_t num = random(
+            1, MP3_BANK1_SOUNDS + MP3_BANK2_SOUNDS + MP3_BANK3_SOUNDS + MP3_BANK4_SOUNDS + MP3_BANK5_SOUNDS
+        );
+        if (num <= MP3_BANK1_SOUNDS) { playSound(1, num); return; }
+        num -= MP3_BANK1_SOUNDS;
+        if (num <= MP3_BANK2_SOUNDS) { playSound(2, num); return; }
+        num -= MP3_BANK2_SOUNDS;
+        if (num <= MP3_BANK3_SOUNDS) { playSound(3, num); return; }
+        num -= MP3_BANK3_SOUNDS;
+        if (num <= MP3_BANK4_SOUNDS) { playSound(4, num); return; }
+        num -= MP3_BANK4_SOUNDS;
+        if (num <= MP3_BANK5_SOUNDS) { playSound(5, num); return; }
+    }
+
+    inline void startRandom()                  { startRandomInSeconds(1); }
+    void startRandomInSeconds(uint32_t secs)   { fRandomEnabled = true; fNextRandomEvent = millis() + secs * 1000UL; }
+    void stopRandom()                          { fRandomEnabledSaved = false; fRandomEnabled = false; }
+    void suspendRandom()                       { fRandomEnabledSaved = fRandomEnabled; fRandomEnabled = false; }
+    void resumeRandomInSeconds(uint32_t secs)  { fRandomEnabled = fRandomEnabledSaved; if (fRandomEnabled) fNextRandomEvent = millis() + secs * 1000UL; }
+    inline void resumeRandom()                 { resumeRandomInSeconds(MP3_MAX_PAUSE_ON_RESUME); }
+
+    // -------------------- Volume --------------------
+    // DFPlayer: 1..30; DY-SV5W: 0..30; MP3 Trigger: 0(Loud)..240(Mute)
+    void volumeMid()  { setVolume(0.5f); }
+    void volumeOff()  { setVolume(0.0f); }
+    void volumeMax()  { setVolume(1.0f); }
+    void volumeMin()  { setVolume(0.01f); }
+    void volumeUp()   { setVolume(fVolume + (1.0f / MP3_VOLUME_STEPS)); }
+    void volumeDown() { setVolume(fVolume - (1.0f / MP3_VOLUME_STEPS)); }
+
+    void setVolume(float volume) {
+        volume = (volume < 0.0f) ? 0.0f : (volume > 1.0f ? 1.0f : volume);
+        fVolume = volume;
+
+        switch (fModule) {
+            case kDisabled: break;
+
+            case kDFMini_UART: {
+                int v = (int)ceilf(volume * DF_VOLUME_MAX);
+                if (v < DF_VOLUME_MIN && volume > 0.0f) v = DF_VOLUME_MIN;
+                if (v > DF_VOLUME_MAX) v = DF_VOLUME_MAX;
+                fDFMini.volume(v);
+            } break;
+
+            case kDY_SV5W_UART: {
+                // 0..30 (20 default) per datasheet
+                uint8_t v = (uint8_t)roundf(volume * 30.0f);
+                if (v > 30) v = 30;
+                dy_cmd_setVolume(v);
+            } break;
+
+            case kMP3Trigger_UART: {
+                // Map 0.0..1.0 -> 240..0 (Trigger 0 loudest, 240 mute)
+                uint8_t v = (uint8_t)roundf((1.0f - volume) * 240.0f);
+                if (v > 240) v = 240;
+                trig_cmd_setVolume(v);
+            } break;
+        }
+    }
+
+    // -------- Back-compat random range setters used by preferences --------
+    void setRandomMin(uint32_t ms) { fRandomMinDelay = ms; }
+    void setRandomMax(uint32_t ms) { fRandomMaxDelay = ms; }
+
+    // -------------------- $-style compat parser --------------------
+    // Keeps legacy $XYY shortcuts working against the selected module.
+    bool handleCommand(const char* cmd, bool skipStart = false) {
+        if (!cmd) return false;
+        if (skipStart) cmd--;
+        uint8_t len = strlen(cmd);
+        if (!skipStart && cmd[0] != '$') return false;
+        if (len < 2 || len > 4) return false;
+
+        char c1 = cmd[1];
+
+        if (isdigit(c1)) {
+            stopRandom();
+            uint8_t bank = (uint8_t)c1 - '0';
+            uint8_t sound = (len > 2) ? (uint8_t)atoi(cmd + 2) : 0;
             playSound(bank, sound);
             return true;
         }
 
-        // the command is a character
-        switch(cmdch)
-        {
-            case 'R':   // R - random from 4 first banks
-                startRandom(); // keep firing random sounds
-                break;
-            case 'O':   // O - sound off
-                stopRandom();
-                volumeOff();
-                break;
-            case 'L':   // L - Leia message (bank 7 sound 1)
-                suspendRandom();
-                playSound(7,1);
-                resumeRandomInSeconds(44); // 34s + 10s extra long delay
-                break;
-            case 'C':   // C - Cantina music (bank 9 sound 5)
-                suspendRandom();
-                playSound(8,5);
-                resumeRandomInSeconds(56); // extra long delay
-                break;
-            case 'c':   // c - Beep cantina (bank 9 sound 1)
-                suspendRandom();
-                playSound(8,1);
-                resumeRandomInSeconds(27); // extra long delay
-                break;
-            case 'S':   // S - Scream (bank 6 sound 1)
-                suspendRandom();
-                playSound(6,2);
-                resumeRandom();
-                break;
-            case 'F':   // F - Faint/Short Circuit (bank 6 sound 3)
-                suspendRandom();
-                playSound(6,3);
-                resumeRandom();
-                break;
-            case 'D':   // D - Disco (bank 9 sound 6)
-                suspendRandom();
-                playSound(8,6);
-                resumeRandomInSeconds(40); // 6:26 +10s min extra long delay
-                break;
-            case 's':   // s - stop sounds
-                stopRandom();
-                stop();
-                break;
-            case '+':   // + - volume up
-                volumeUp();
-                break;
-            case '-':   // - - volume down
-                volumeDown();
-                break;
-            case 'm':   // m - volume mid
-                volumeMid();
-                break;
-            case 'f':   // f - volume max
-                volumeMax();
-                break;
-            case 'p':   // p - volume min
-                volumeMin();
-                break;
-            case 'W':   // W - Star Wars music (bank 9 sound 2)
-                stopRandom();      // so long, just stop random
-                playSound(8,2);
-                break;
-            case 'M':   // M - Imperial March (bank 9 sound 3)
-                stopRandom();      // so long, just stop random
-                playSound(8,3);
-                break;
-            default:
-                return false;
+        switch (c1) {
+            case 'R': startRandom(); break;
+            case 'O': stopRandom(); volumeOff(); break;
+            case 'L': suspendRandom(); playSound(7,1);  resumeRandomInSeconds(44); break;
+            case 'C': suspendRandom(); playSound(8,5);  resumeRandomInSeconds(56); break;
+            case 'c': suspendRandom(); playSound(8,1);  resumeRandomInSeconds(27); break;
+            case 'S': suspendRandom(); playSound(6,2);  resumeRandom(); break;
+            case 'F': suspendRandom(); playSound(6,3);  resumeRandom(); break;
+            case 'D': suspendRandom(); playSound(8,6);  resumeRandomInSeconds(40); break;
+            case 's': stopRandom();   stop();           break;
+            case '+': volumeUp();     break;
+            case '-': volumeDown();   break;
+            case 'm': volumeMid();    break;
+            case 'f': volumeMax();    break;
+            case 'p': volumeMin();    break;
+            case 'W': stopRandom();   playSound(8,2);   break;
+            case 'M': stopRandom();   playSound(8,3);   break;
+            default:  return false;
         }
         return true;
     }
 
 private:
+    // -------- Internal state --------
     DFRobotDFPlayerMini fDFMini;
-    Stream* fStream = nullptr;
-    float fVolume = 0.5;
-    Module fModule = kDisabled;
-    bool fRandomEnabled = false;
-    bool fRandomEnabledSaved = false;
-    uint32_t fNextRandomEvent = 0;
-    uint32_t fRandomMinDelay = 600;
-    uint32_t fRandomMaxDelay = 10000;
-    int fStartupSound = -1;
-    // global variables, current indexes to banks
-    uint8_t fBankIndexes[MP3_MAX_BANKS];
+    Stream*   fDFSerial   = nullptr; // DFPlayer UART
+    Stream*   fDYSerial   = nullptr; // DY-SV5W  UART
+    Stream*   fTrigSerial = nullptr; // MP3 Trigger UART
+
+    Module    fModule = kDisabled;
+    float     fVolume = 0.5f;
+
+    bool      fRandomEnabled = false;
+    bool      fRandomEnabledSaved = false;
+    uint32_t  fNextRandomEvent = 0;
+    uint32_t  fRandomMinDelay = MP3_MIN_RANDOM_PAUSE;
+    uint32_t  fRandomMaxDelay = MP3_MAX_RANDOM_PAUSE;
+    int       fStartupSound = -1;
+
+    uint8_t   fBankIndexes[MP3_MAX_BANKS] {};
     const uint8_t fMaxSounds[MP3_MAX_BANKS] =
     {
-        MP3_BANK1_SOUNDS,
-        MP3_BANK2_SOUNDS,
-        MP3_BANK3_SOUNDS,
-        MP3_BANK4_SOUNDS,
-        MP3_BANK5_SOUNDS,
-        MP3_BANK6_SOUNDS,
-        MP3_BANK7_SOUNDS,
-        MP3_BANK8_SOUNDS,
-        MP3_BANK9_SOUNDS
-    };
-    enum
-    {
-        kGenSounds = 1,
-        kChatSounds = 2,
-        kHappySounds = 3,
-        kSadSounds = 4,
-        kWhistleSounds = 5,
-        kScreamSounds = 6,
-        kLeiaSounds = 7,
-        kSingSounds = 8,
-        kMusicSounds = 9
+        MP3_BANK1_SOUNDS, MP3_BANK2_SOUNDS, MP3_BANK3_SOUNDS,
+        MP3_BANK4_SOUNDS, MP3_BANK5_SOUNDS, MP3_BANK6_SOUNDS,
+        MP3_BANK7_SOUNDS, MP3_BANK8_SOUNDS, MP3_BANK9_SOUNDS
     };
 
-    void sendMP3(uint8_t cmd)
-    {
-        SOUND_DEBUG("MP3:0x%02X\n", cmd);
-        if (fStream != nullptr)
-            fStream->write(cmd);
+    enum { kGenSounds=1, kChatSounds, kHappySounds, kSadSounds, kWhistleSounds, kScreamSounds, kLeiaSounds, kSingSounds, kMusicSounds };
+
+    // -------- Helpers --------
+    void resetBankIndexes() { for (uint8_t i=0; i<MP3_MAX_BANKS; ++i) fBankIndexes[i] = 0; }
+
+    // ===== DY-SV5W UART protocol (9600 8N1) =====
+    // Frame format used here: 0xAA, CMD, LEN, [DATA...], SM (sum of prior bytes, low 8 bits)
+    void dy_send(uint8_t cmd, const uint8_t* data=nullptr, uint8_t len=0) {
+        if (!fDYSerial) return;
+        uint8_t sum = 0;
+        auto put = [&](uint8_t b){ fDYSerial->write(b); sum += b; };
+        put(0xAA); put(cmd); put(len);
+        for (uint8_t i=0; i<len; ++i) put(data[i]);
+        fDYSerial->write(sum); // SM
+    }
+    void dy_cmd_stop()                    { dy_send(0x04, nullptr, 0); }
+    void dy_cmd_play()                    { dy_send(0x02, nullptr, 0); }
+    void dy_cmd_pause()                   { dy_send(0x03, nullptr, 0); }
+    void dy_cmd_prev()                    { dy_send(0x05, nullptr, 0); }
+    void dy_cmd_next()                    { dy_send(0x06, nullptr, 0); }
+    void dy_cmd_setVolume(uint8_t v0_30)  { uint8_t d[1]={ (uint8_t)(v0_30>30?30:v0_30) }; dy_send(0x13,d,1); }
+
+    // Select specified music: AA 07 02 HI LO SM (track number 1..65535)
+    void dy_cmd_playTrack(uint16_t track1based) {
+        uint8_t d[2] = { (uint8_t)((track1based >> 8) & 0xFF), (uint8_t)(track1based & 0xFF) };
+        dy_send(0x07, d, 2);
     }
 
-    void sendHCR(const char* cmd)
-    {
-        SOUND_DEBUG("HCR: %s\n", cmd);
-        if (fStream != nullptr)
-            fStream->print(cmd);
+    // ===== SparkFun MP3 Trigger UART (38400 8N1) =====
+    // Minimal command set:
+    //  't' + <bin index 0..255>  -> play track by index (binary)
+    //  'O'                        -> stop
+    //  'v' + <0..240>            -> volume (0 loudest .. 240 mute)
+    void trig_write(uint8_t b) { if (fTrigSerial) fTrigSerial->write(b); }
+
+    void trig_cmd_playBinary(uint8_t trackIndex0based) {
+        if (!fTrigSerial) return;
+        trig_write('t');           // binary trigger command
+        trig_write(trackIndex0based);
+    }
+    void trig_cmd_stop() {
+        if (!fTrigSerial) return;
+        trig_write('O');           // Stop
+    }
+    void trig_cmd_setVolume(uint8_t vol0_loud_240_mute) {
+        if (!fTrigSerial) return;
+        if (vol0_loud_240_mute > 240) vol0_loud_240_mute = 240;
+        trig_write('v');           // Set volume
+        trig_write(vol0_loud_240_mute);
     }
 };
 
-MarcSound sMarcSound;
+// Only a declaration here (no inline variables → no C++17 requirement).
+// Define ONE global instance in your .ino:
+//   MarcSound sMarcSound;
+extern MarcSound sMarcSound;

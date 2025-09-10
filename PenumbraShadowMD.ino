@@ -1,5 +1,5 @@
 // =======================================================================================
-//                      Penumbra Shadow MD: Derived from SHADOW_MD
+//                      Penumbra Shadow Maestro: Derived from SHADOW_MD
 // =======================================================================================
 //        SHADOW_MD:  Small Handheld Arduino Droid Operating Wand + MarcDuino
 // =======================================================================================
@@ -67,9 +67,9 @@
 #define USE_PREFERENCES
 #define USE_SABERTOOTH_PACKET_SERIAL
 //#define USE_CYTRON_PACKET_SERIAL
-//#define USE_MP3_TRIGGER
+#define USE_MP3_TRIGGER
 //#define USE_DFMINI_PLAYER
-#define USE_HCR_VOCALIZER
+//#define USE_HCR_VOCALIZER
 
 //For Speed Setting (Normal): set this to whatever speeds works for you. 0-stop, 127-full speed.
 #define DEFAULT_DRIVE_SPEED_NORMAL          70
@@ -108,8 +108,8 @@
 // Motor serial communication baud rate. Default 9600
 #define DEFAULT_MOTOR_BAUD                  9600
 
-// Marcduino serial communication baud rate. Default 9600
-#define DEFAULT_MARCDUINO_BAUD              9600
+// Maestro serial communication baud rate. Default 9600
+#define DEFAULT_MAESTRO_BAUD              9600
 
 #define PS3_CONTROLLER_FOOT_MAC       "XX:XX:XX:XX:XX:XX"  //Set this to your FOOT PS3 controller MAC address
 #define PS3_CONTROLLER_DOME_MAC       "XX:XX:XX:XX:XX:XX"  //Set to a secondary DOME PS3 controller MAC address (Optional)
@@ -141,7 +141,8 @@ int time360DomeTurn = DEFAULT_AUTO_DOME_TURN_TIME;
 
 // #define SHADOW_DEBUG(...) printf(__VA_ARGS__);
 #define SHADOW_VERBOSE(...) printf(__VA_ARGS__);
-
+#include "MarcduinoSound.h" 
+MarcSound sMarcSound; 
 #ifdef USE_PREFERENCES
 #include <Preferences.h>
 #define PREFERENCE_PS3_FOOT_MAC             "ps3footmac"
@@ -164,120 +165,18 @@ int time360DomeTurn = DEFAULT_AUTO_DOME_TURN_TIME;
 #define PREFERENCE_DOME_AUTO_SPEED          "smdomeautospeed"
 #define PREFERENCE_DOME_DOME_TURN_TIME      "smdometurntime"
 #define PREFERENCE_MOTOR_BAUD               "smmotorbaud"
-#define PREFERENCE_MARCDUINO_BAUD           "smmarcbaud"
+#define PREFERENCE_MAESTRO_BAUD           "smmarcbaud"
 Preferences preferences;
 #endif
 
-// ---------------------------------------------------------------------------------------
-//                          MarcDuino Button Settings
-// ---------------------------------------------------------------------------------------
-// Std MarcDuino Function Codes:
-//     1 = Close All Panels
-//     2 = Scream - all panels open
-//     3 = Wave, One Panel at a time
-//     4 = Fast (smirk) back and forth wave
-//     5 = Wave 2, Open progressively all panels, then close one by one
-//     6 = Beep cantina - w/ marching ants panel action
-//     7 = Faint / Short Circuit
-//     8 = Cantina Dance - orchestral, rhythmic panel dance
-//     9 = Leia message
-//    10 = Disco
-//    11 = Quite mode reset (panel close, stop holos, stop sounds)
-//    12 = Full Awake mode reset (panel close, rnd sound, holo move,holo lights off)
-//    13 = Mid Awake mode reset (panel close, rnd sound, stop holos)
-//    14 = Full Awake+ reset (panel close, rnd sound, holo move, holo lights on)
-//    15 = Scream, with all panels open (NO SOUND)
-//    16 = Wave, one panel at a time (NO SOUND)
-//    17 = Fast (smirk) back and forth (NO SOUND)
-//    18 = Wave 2 (Open progressively, then close one by one) (NO SOUND)
-//    19 = Marching Ants (NO SOUND)
-//    20 = Faint/Short Circuit (NO SOUND)
-//    21 = Rhythmic cantina dance (NO SOUND)
-//    22 = Random Holo Movement On (All) - No other actions
-//    23 = Holo Lights On (All)
-//    24 = Holo Lights Off (All)
-//    25 = Holo reset (motion off, lights off)
-//    26 = Volume Up
-//    27 = Volume Down
-//    28 = Volume Max
-//    29 = Volume Mid
-//    30 = Open All Dome Panels
-//    31 = Open Top Dome Panels
-//    32 = Open Bottom Dome Panels
-//    33 = Close All Dome Panels
-//    34 = Open Dome Panel #1
-//    35 = Close Dome Panel #1
-//    36 = Open Dome Panel #2
-//    37 = Close Dome Panel #2
-//    38 = Open Dome Panel #3
-//    39 = Close Dome Panel #3
-//    40 = Open Dome Panel #4
-//    41 = Close Dome Panel #4
-//    42 = Open Dome Panel #5
-//    43 = Close Dome Panel #5
-//    44 = Open Dome Panel #6
-//    45 = Close Dome Panel #6
-//    46 = Open Dome Panel #7
-//    47 = Close Dome Panel #7
-//    48 = Open Dome Panel #8
-//    49 = Close Dome Panel #8
-//    50 = Open Dome Panel #9
-//    51 = Close Dome Panel #9
-//    52 = Open Dome Panel #10
-//    53 = Close Dome Panel #10
-//   *** BODY PANEL OPTIONS ASSUME SECOND MARCDUINO MASTER BOARD ON MEGA ADK SERIAL #3 ***
-//    54 = Open All Body Panels
-//    55 = Close All Body Panels
-//    56 = Open Body Panel #1
-//    57 = Close Body Panel #1
-//    58 = Open Body Panel #2
-//    59 = Close Body Panel #2
-//    60 = Open Body Panel #3
-//    61 = Close Body Panel #3
-//    62 = Open Body Panel #4
-//    63 = Close Body Panel #4
-//    64 = Open Body Panel #5
-//    65 = Close Body Panel #5
-//    66 = Open Body Panel #6
-//    67 = Close Body Panel #6
-//    68 = Open Body Panel #7
-//    69 = Close Body Panel #7
-//    70 = Open Body Panel #8
-//    71 = Close Body Panel #8
-//    72 = Open Body Panel #9
-//    73 = Close Body Panel #9
-//    74 = Open Body Panel #10
-//    75 = Close Body Panel #10
-//   *** MAGIC PANEL LIGHTING COMMANDS
-//    76 = Magic Panel ON
-//    77 = Magic Panel OFF
-//    78 = Magic Panel Flicker (10 seconds) 
-//
-// Std MarcDuino Logic Display Functions (For custom functions)
-//     1 = Display normal random sequence
-//     2 = Short circuit (10 second display sequence)
-//     3 = Scream (flashing light display sequence)
-//     4 = Leia (34 second light sequence)
-//     5 = Display “Star Wars”
-//     6 = March light sequence
-//     7 = Spectrum, bar graph display sequence
-//     8 = Display custom text
-//
-// Std MarcDuino Panel Functions (For custom functions)
-//     1 = Panels stay closed (normal position)
-//     2 = Scream sequence, all panels open
-//     3 = Wave panel sequence
-//     4 = Fast (smirk) back and forth panel sequence
-//     5 = Wave 2 panel sequence, open progressively all panels, then close one by one)
-//     6 = Marching ants panel sequence
-//     7 = Faint / short circuit panel sequence
-//     8 = Rhythmic cantina panel sequence
-//     9 = Custom Panel Sequence
+// =======================================================================================
 
-// Marcduino Action Syntax:
-// #<1-76> Standard Marcduino Functions
-// MP3=<182->,LD=<1-8>,LDText="Hello World",Panel=M<1-8>,Panel<1-10>[delay=1,open=5]
-bool handleMarcduinoAction(const char* action);
+// NEW prototypes
+bool handleMaestroAction(const char* action);
+void sendDomeMaestroSequence(uint8_t subIndex);
+void sendBodyMaestroSequence(uint8_t subIndex);
+
+// Back-compat shims (optional)
 void sendMarcCommand(const char* cmd);
 void sendBodyMarcCommand(const char* cmd);
 
@@ -285,50 +184,40 @@ class MarcduinoButtonAction
 {
 public:
     MarcduinoButtonAction(const char* name, const char* default_action) :
-        fNext(NULL),
-        fName(name),
-        fDefaultAction(default_action)
+        fNext(NULL), fName(name), fDefaultAction(default_action)
     {
-        if (*head() == NULL)
-            *head() = this;
-        if (*tail() != NULL)
-            (*tail())->fNext = this;
+        if (*head() == NULL) *head() = this;
+        if (*tail() != NULL) (*tail())->fNext = this;
         *tail() = this;
     }
 
     static MarcduinoButtonAction* findAction(String name)
     {
         for (MarcduinoButtonAction* btn = *head(); btn != NULL; btn = btn->fNext)
-        {
-            if (name.equalsIgnoreCase(btn->name()))
-                return btn;
-        }
+            if (name.equalsIgnoreCase(btn->name())) return btn;
         return nullptr;
     }
+
 
     static void listActions()
     {
         for (MarcduinoButtonAction* btn = *head(); btn != NULL; btn = btn->fNext)
-        {
             printf("%s: %s\n", btn->name().c_str(), btn->action().c_str());
-        }
     }
 
     void reset()
     {
-        preferences.remove(fName);
+        String key = fName;
+        if (key.length() > 15) key = key.substring(0, 15);
+        preferences.remove(key.c_str());
     }
 
     void setAction(String newAction)
     {
-        if (strlen(fName) > 15)
-        {
-            String key = fName;
-            key = key.substring(0, 15);
+        if (strlen(fName) > 15) {
+            String key = String(fName).substring(0, 15);
             preferences.putString(key.c_str(), newAction);
-        }
-        else
-        {
+        } else {
             preferences.putString(fName, newAction);
         }
     }
@@ -336,23 +225,23 @@ public:
     void trigger()
     {
         SHADOW_VERBOSE("TRIGGER: %s\n", fName);
-        handleMarcduinoAction(action().c_str());
+        handleMaestroAction(action().c_str());
     }
 
-    String name()
-    {
-        return fName;
-    }
-
+    String name()   { return fName; }
+    
     String action()
     {
-        if (strlen(fName) > 15)
-        {
-            String key = fName;
-            key = key.substring(0, 15);
+        // NVS keys are limited to 15 chars → use a truncated key when needed
+        String key = fName;
+        if (key.length() > 15) key = key.substring(0, 15);
+
+        // Avoid NOT_FOUND spam: only call getString if the key exists
+        if (preferences.isKey(key.c_str())) {
             return preferences.getString(key.c_str(), fDefaultAction);
+        } else {
+            return String(fDefaultAction);
         }
-        return preferences.getString(fName, fDefaultAction);
     }
 
 private:
@@ -360,70 +249,64 @@ private:
     const char* fName;
     const char* fDefaultAction;
 
-    static MarcduinoButtonAction** head()
-    {
-        static MarcduinoButtonAction* sHead;
-        return &sHead;
-    }
-
-    static MarcduinoButtonAction** tail()
-    {
-        static MarcduinoButtonAction* sTail;
-        return &sTail;
-    }
+    static MarcduinoButtonAction** head() { static MarcduinoButtonAction* sHead; return &sHead; }
+    static MarcduinoButtonAction** tail() { static MarcduinoButtonAction* sTail; return &sTail; }
 };
 
-#define MARCDUINO_ACTION(var,act) \
-MarcduinoButtonAction var(#var,act);
+#define MARCDUINO_ACTION(var,act) MarcduinoButtonAction var(#var,act);
+
+
 
 //----------------------------------------------------
 // CONFIGURE: The FOOT Navigation Controller Buttons
 //----------------------------------------------------
 
-MARCDUINO_ACTION(btnUP_MD, "#12")
-MARCDUINO_ACTION(btnLeft_MD, "#13")
-MARCDUINO_ACTION(btnRight_MD, "#14")
-MARCDUINO_ACTION(btnDown_MD, "#11")
-MARCDUINO_ACTION(btnUP_CROSS_MD, "#26")
-MARCDUINO_ACTION(btnLeft_CROSS_MD, "#23")
-MARCDUINO_ACTION(btnRight_CROSS_MD, "#24")
-MARCDUINO_ACTION(btnDown_CROSS_MD, "#27")
-MARCDUINO_ACTION(btnUP_CIRCLE_MD, "#2")
-MARCDUINO_ACTION(btnLeft_CIRCLE_MD, "#4")
-MARCDUINO_ACTION(btnRight_CIRCLE_MD, "#7")
-MARCDUINO_ACTION(btnDown_CIRCLE_MD, "#10")
-MARCDUINO_ACTION(btnUP_PS_MD, "$71,LD=5")
-MARCDUINO_ACTION(btnLeft_PS_MD, "$81,LD=1")
-MARCDUINO_ACTION(btnRight_PS_MD, "$83,LD=1")
-MARCDUINO_ACTION(btnDown_PS_MD, "$82,LD=1")
-MARCDUINO_ACTION(btnUP_L1_MD, "#8")
-MARCDUINO_ACTION(btnLeft_L1_MD, "#3")
-MARCDUINO_ACTION(btnRight_L1_MD, "#5")
-MARCDUINO_ACTION(btnDown_L1_MD, "#9")
+MARCDUINO_ACTION(btnUP_MD, "BM:1")
+MARCDUINO_ACTION(btnLeft_MD, "BM:2")
+MARCDUINO_ACTION(btnRight_MD, "BM:3")
+MARCDUINO_ACTION(btnDown_MD, "BM:4")
+MARCDUINO_ACTION(btnUP_L1_MD, "BM:5")
+MARCDUINO_ACTION(btnLeft_L1_MD, "BM:6")
+MARCDUINO_ACTION(btnRight_L1_MD, "BM:7")
+MARCDUINO_ACTION(btnDown_L1_MD, "BM:8")
+MARCDUINO_ACTION(btnUP_CROSS_MD, "BM:9")
+MARCDUINO_ACTION(btnLeft_CROSS_MD, "BM:10")
+MARCDUINO_ACTION(btnRight_CROSS_MD, "BM:11")
+MARCDUINO_ACTION(btnDown_CROSS_MD, "BM:12")
+MARCDUINO_ACTION(btnUP_CIRCLE_MD, "BM:13")
+MARCDUINO_ACTION(btnLeft_CIRCLE_MD, "BM:14")
+MARCDUINO_ACTION(btnRight_CIRCLE_MD, "BM:15")
+MARCDUINO_ACTION(btnDown_CIRCLE_MD, "BM:16")
+MARCDUINO_ACTION(btnUP_PS_MD, "BM:17")
+MARCDUINO_ACTION(btnLeft_PS_MD, "BM:18")
+MARCDUINO_ACTION(btnRight_PS_MD, "BM:19")
+MARCDUINO_ACTION(btnDown_PS_MD, "BM:20")
+
 
 //----------------------------------------------------
 // CONFIGURE: The DOME Navigation Controller Buttons
 //----------------------------------------------------
-MARCDUINO_ACTION(FTbtnUP_MD, "#58")             // Arrow Up
-MARCDUINO_ACTION(FTbtnLeft_MD, "#56")           // Arrow Left
-MARCDUINO_ACTION(FTbtnRight_MD, "#57")          // Arrow Right
-MARCDUINO_ACTION(FTbtnDown_MD, "#59")           // Arrow Down
-MARCDUINO_ACTION(FTbtnUP_CROSS_MD, "#28")       // Arrow UP + CROSS
-MARCDUINO_ACTION(FTbtnLeft_CROSS_MD, "#33")     // Arrow Left + CROSS
-MARCDUINO_ACTION(FTbtnRight_CROSS_MD, "#30")    // Arrow Right + CROSS
-MARCDUINO_ACTION(FTbtnDown_CROSS_MD, "#29")     // Arrow Down + CROSS
-MARCDUINO_ACTION(FTbtnUP_CIRCLE_MD, "#22")      // Arrow Up + CIRCLE
-MARCDUINO_ACTION(FTbtnLeft_CIRCLE_MD, "#23")    // Arrow Left + CIRCLE
-MARCDUINO_ACTION(FTbtnRight_CIRCLE_MD, "#24")   // Arrow Right + CIRCLE
-MARCDUINO_ACTION(FTbtnDown_CIRCLE_MD, "#25")    // Arrow Down + CIRCLE
-MARCDUINO_ACTION(FTbtnUP_PS_MD, "#38")          // Arrow UP + PS
-MARCDUINO_ACTION(FTbtnLeft_PS_MD, "#40")        // Arrow Left + PS
-MARCDUINO_ACTION(FTbtnRight_PS_MD, "#41")       // Arrow Right + PS
-MARCDUINO_ACTION(FTbtnDown_PS_MD, "#39")        // Arrow Down + PS
-MARCDUINO_ACTION(FTbtnUP_L1_MD, "#34")          // Arrow UP + L1
-MARCDUINO_ACTION(FTbtnLeft_L1_MD, "#36")        // Arrow Left + L1
-MARCDUINO_ACTION(FTbtnRight_L1_MD, "#37")       // Arrow Right + L1
-MARCDUINO_ACTION(FTbtnDown_L1_MD, "#35")        // Arrow Down + L1
+MARCDUINO_ACTION(FTbtnUP_MD, "DM:1")             // Arrow Up
+MARCDUINO_ACTION(FTbtnLeft_MD, "DM:2")           // Arrow Left
+MARCDUINO_ACTION(FTbtnRight_MD, "DM:3")          // Arrow Right
+MARCDUINO_ACTION(FTbtnDown_MD, "DM:4")           // Arrow Down
+MARCDUINO_ACTION(FTbtnUP_L1_MD, "DM:5")          // Arrow UP + L1
+MARCDUINO_ACTION(FTbtnLeft_L1_MD, "DM:6")        // Arrow Left + L1
+MARCDUINO_ACTION(FTbtnRight_L1_MD, "DM:7")       // Arrow Right + L1
+MARCDUINO_ACTION(FTbtnDown_L1_MD, "DM:8")        // Arrow Down + L1
+MARCDUINO_ACTION(FTbtnUP_CROSS_MD, "DM:9")       // Arrow UP + CROSS
+MARCDUINO_ACTION(FTbtnLeft_CROSS_MD, "DM:10")    // Arrow Left + CROSS
+MARCDUINO_ACTION(FTbtnRight_CROSS_MD, "DM:11")   // Arrow Right + CROSS
+MARCDUINO_ACTION(FTbtnDown_CROSS_MD, "DM:12")    // Arrow Down + CROSS
+MARCDUINO_ACTION(FTbtnUP_CIRCLE_MD, "DM:13")     // Arrow Up + CIRCLE
+MARCDUINO_ACTION(FTbtnLeft_CIRCLE_MD, "DM:14")   // Arrow Left + CIRCLE
+MARCDUINO_ACTION(FTbtnRight_CIRCLE_MD, "DM:15")  // Arrow Right + CIRCLE
+MARCDUINO_ACTION(FTbtnDown_CIRCLE_MD, "DM:16")   // Arrow Down + CIRCLE
+MARCDUINO_ACTION(FTbtnUP_PS_MD, "DM:17")         // Arrow UP + PS
+MARCDUINO_ACTION(FTbtnLeft_PS_MD, "DM:18")       // Arrow Left + PS
+MARCDUINO_ACTION(FTbtnRight_PS_MD, "DM:19")      // Arrow Right + PS
+MARCDUINO_ACTION(FTbtnDown_PS_MD, "DM:20")       // Arrow Down + PS
+
 
 // ---------------------------------------------------------------------------------------
 //               SYSTEM VARIABLES - USER CONFIG SECTION COMPLETED
@@ -434,12 +317,11 @@ MARCDUINO_ACTION(FTbtnDown_L1_MD, "#35")        // Arrow Down + L1
 // ---------------------------------------------------------------------------------------
 
 int motorControllerBaudRate = DEFAULT_MOTOR_BAUD;
-int marcDuinoBaudRate = DEFAULT_MARCDUINO_BAUD;
+int maestroBaudRate = DEFAULT_MAESTRO_BAUD;
 
 #define FOOT_MOTOR_ADDR      128      // Serial Address for Foot Motor
 #define DOME_MOTOR_ADDR      129      // Serial Address for Dome Motor
 
-#define ENABLE_UHS_DEBUGGING 1
 
 // ---------------------------------------------------------------------------------------
 //                          Libraries
@@ -449,7 +331,9 @@ int marcDuinoBaudRate = DEFAULT_MARCDUINO_BAUD;
 #include <core/StringUtils.h>
 
 #include <PS3BT.h>
+
 #include <usbhub.h>
+
 
 // Satisfy IDE, which only needs to see the include statment in the ino.
 #ifdef dobogusinclude
@@ -471,19 +355,51 @@ static unsigned sPos;
 static char sBuffer[CONSOLE_BUFFER_SIZE];
 
 // ---------------------------------------------------------------------------------------
-//                    Panel Management Variables
+//                    Low-level Maestro helpers
 // ---------------------------------------------------------------------------------------
-static bool sRunningCustRoutine = false;
-
-struct PanelStatus
+bool handleSMSOUND(const char* bracketArg)
 {
-    uint8_t fStatus = 0;
-    uint32_t fStartTime = 0;
-    uint8_t fStartDelay = 1;
-    uint8_t fDuration = 5;
-};
+    if (!bracketArg) return false;
+    int val = atoi(bracketArg);               // 0..3 from your UI
+    MarcSound::Module mod = MarcSound::fromChoice(val);
+    uint32_t baud = MarcSound::baudFor(mod);
 
-PanelStatus sPanelStatus[PANEL_COUNT];
+    // Persist choice
+    preferences.putInt(PREFERENCE_MARCSOUND, (int)mod);
+
+    // Re-init immediately (optional; or just apply next boot)
+    sMarcSound.end();
+    SOUND_SERIAL.end();
+    if (baud) SOUND_SERIAL_INIT(baud);        // uses your pin-map.h macros
+    if (baud) sMarcSound.begin(mod, SOUND_SERIAL, /*startupSound*/ -1);
+
+    DEBUG_PRINTF("Sound module: %s (%d baud)\n", MarcSound::moduleName(mod), (int)baud);
+    return true;
+}
+
+static inline void maestroRestartAtSub(Stream& port, uint8_t subIndex)
+{
+    // Compact protocol: 0xA7 <subIndex>
+    uint8_t pkt[2] = { 0xA7, subIndex };
+    port.write(pkt, sizeof(pkt));
+}
+
+void sendDomeMaestroSequence(uint8_t subIndex)
+{
+    maestroRestartAtSub(MAESTRO_SERIAL, subIndex);
+#ifdef SHADOW_VERBOSE
+    SHADOW_VERBOSE("Dome Maestro: sub %u\n", subIndex);
+#endif
+}
+
+void sendBodyMaestroSequence(uint8_t subIndex)
+{
+    maestroRestartAtSub(BODY_MAESTRO_SERIAL, subIndex);
+#ifdef SHADOW_VERBOSE
+    SHADOW_VERBOSE("Body Maestro: sub %u\n", subIndex);
+#endif
+}
+
 
 // ---------------------------------------------------------------------------------------
 //                          Variables
@@ -568,272 +484,131 @@ int footDriveSpeed = 0;
 
 // =======================================================================================
 
-static const char* DEFAULT_MARCDUINO_COMMANDS[] = {
-#include "MarcduinoCommands.h"
-};
+static inline bool _isSpace(char c){ return c==' '||c=='\t'||c=='\r'||c=='\n'; }
 
-bool handleMarcduinoAction(const char* action)
+static String _trimCopy(const char* s)
 {
-    String LD_text = "";
-    bool panelTypeSelected = false;
-    char buffer[1024];
-    snprintf(buffer, sizeof(buffer), "%s", action);
-    char* cmd = buffer;
-    if (*cmd == '#')
-    {
-        // Std Marcduino Function Call Configured
-        uint32_t seq = strtolu(cmd+1, &cmd);
-        if (*cmd == '\0')
-        {
-            if (seq >= 1 && seq <= SizeOfArray(DEFAULT_MARCDUINO_COMMANDS))
-            {
-                // If the commands starts with "BM" we direct it to the body marc controller
-                const char* marcCommand = DEFAULT_MARCDUINO_COMMANDS[seq-1];
-                if (marcCommand[0] == 'B' && marcCommand[1] == 'M')
-                {
-                    sendBodyMarcCommand(&marcCommand[2]);
-                }
-                else
-                {
-                    // Otherwise we send it to the dome Marcduino
-                    sendMarcCommand(marcCommand);
-                }
-                return true;
-            }
-            else
-            {
-                SHADOW_DEBUG("Marcduino sequence range is 1-%d in action command \"%s\"\n", SizeOfArray(DEFAULT_MARCDUINO_COMMANDS), action)
-                return false;
-            }
-        }
-        SHADOW_DEBUG("Excepting number after # in action command \"%s\"\n", action)
-        return false;
+    if (!s) return String();
+    const char* b = s; while (*b && _isSpace(*b)) ++b;
+    const char* e = b + strlen(b); while (e>b && _isSpace(*(e-1))) --e;
+    return String(b).substring(0, e-b);
+}
+
+// Play a numeric sound track via your sound backend (bank 0=flat index)
+static void _playTrackNumber(long n)
+{
+    if (n < 1) n = 1;
+    if (n > 225) n = 225;
+    sMarcSound.playSound(0, (uint8_t)n);
+}
+
+// Send a single-letter sound command as "$<LETTER>"
+static void _soundLetterCmd(char letter)
+{
+    char buf[3] = {'$', (char)toupper((unsigned char)letter), 0};
+    sMarcSound.handleCommand(buf);
+}
+
+// Parse "S..." after a semicolon; return true if something was executed.
+static bool _handleSoundSuffix(const String& sVal)
+{
+    if (sVal.length() == 0) return false;
+
+    // S<letter> ?
+    if (sVal.length() == 1 && !isdigit((unsigned char)sVal[0])) {
+        _soundLetterCmd(sVal[0]);
+        return true;
     }
-    for (;;)
-    {
-        char buf[100];
-        if (*cmd == '"')
-        {
-            // Skip the quote
-            cmd++;
-            char* marcCommand = cmd;
-            char* nextCmd = strchr(cmd, ',');
-            if (nextCmd != nullptr)
-            {
-                size_t len = nextCmd - marcCommand;
-                strncpy(buf, marcCommand, len);
-                buf[len] = '\0';
-                cmd = nextCmd;
-                marcCommand = buf;
-            }
-            else
-            {
-                cmd += strlen(marcCommand);
-            }
-            // If the commands starts with "BM" we direct it to the body marc controller
-            if (marcCommand[0] == 'B' && marcCommand[1] == 'M')
-            {
-                sendBodyMarcCommand(&marcCommand[2]);
-            }
-            else
-            {
-                sendMarcCommand(marcCommand);
-            }
-        }
-        else if (*cmd == '$')
-        {
-            char* mp3Cmd = cmd;
-            char* nextCmd = strchr(cmd, ',');
-            if (nextCmd != nullptr)
-            {
-                size_t len = nextCmd - mp3Cmd;
-                strncpy(buf, mp3Cmd, len);
-                buf[len] = '\0';
-                cmd = nextCmd;
-                mp3Cmd = buf;
-            }
-            else
-            {
-                cmd += strlen(mp3Cmd);
-            }
-            sendMarcCommand(mp3Cmd);
-        }
-        else if (startswith(cmd, "MP3="))
-        {
-            char* mp3Cmd = cmd;
-            char* nextCmd = strchr(cmd, ',');
-            if (nextCmd != nullptr)
-            {
-                size_t len = nextCmd - mp3Cmd;
-                buf[0] = '$';
-                strncpy(&buf[1], mp3Cmd, len);
-                buf[len+1] = '\0';
-                cmd = nextCmd;
-                mp3Cmd = buf;
-            }
-            else
-            {
-                cmd += strlen(mp3Cmd);
-            }
-            sendMarcCommand(mp3Cmd);
-        }
-        else if (startswith(cmd, "Panel=M"))
-        {
-            static const char* sCommands[] = {
-                ":CL00",
-                ":SE51",
-                ":SE52",
-                ":SE53",
-                ":SE54",
-                ":SE55",
-                ":SE56",
-                ":SE57"
-            };
-            uint32_t num = strtolu(cmd, &cmd);
-            if (num >= 1 && num <= SizeOfArray(sCommands))
-            {
-                if (num > 1)
-                {
-                    sendMarcCommand(":CL00");  // close all the panels prior to next custom routine
-                    delay(50); // give panel close command time to process before starting next panel command 
-                }
-                sendMarcCommand(sCommands[num-1]);
-                panelTypeSelected = true;
-            }
-            else
-            {
-                SHADOW_DEBUG("Marc Panel range is 1 - %d in action command \"%s\"\n", SizeOfArray(sCommands), action)
-                return false;
-            }
-        }
-        else if (startswith(cmd, "Panel"))
-        {
-            uint32_t num = strtolu(cmd, &cmd);
-            if (num >= 1 && num <= SizeOfArray(sPanelStatus))
-            {
-                PanelStatus &panel = sPanelStatus[num-1];
-                panel.fStatus = 1;
-                if (*cmd == '[')
-                {
-                    cmd++;
-                    do
-                    {
-                        if (startswith(cmd, "delay="))
-                        {
-                            uint32_t delayNum = strtolu(cmd, &cmd);
-                            if (delayNum < 31)
-                            {
-                                panel.fStartDelay = delayNum;
-                            }
-                            else
-                            {
-                                panel.fStatus = 0;
-                            }
-                        }
-                        else if (startswith(cmd, "dur="))
-                        {
-                            uint32_t duration = strtolu(cmd, &cmd);
-                            if (duration < 31)
-                            {
-                                panel.fDuration = duration;
-                            }
-                            else
-                            {
-                                panel.fStatus = 0;
-                            }
-                        }
-                        else if (*cmd == ',')
-                        {
-                            cmd++;
-                        }
-                    }
-                    while (*cmd != '\0' && *cmd != ']');
-                    if (*cmd == ']')
-                        cmd++;
-                }
-                if (panel.fStatus)
-                {
-                    panelTypeSelected = true;
-                    panel.fStartTime = millis();
-                }
-            }
-            else
-            {
-                SHADOW_DEBUG("Panel range is 1 - %d in action command \"%s\"\n", SizeOfArray(sPanelStatus), action)
-                return false;
-            }
-        }
-        else if (startswith(cmd, "LDText=\""))
-        {
-            char* startString = ++cmd;
-            while (*cmd != '\0' && *cmd != '"')
-                cmd++;
-            if (*cmd == '"')
-                *cmd = '\0';
-            LD_text = startString;
-        }
-        else if (startswith(cmd, "LD="))
-        {
-            uint32_t num = strtolu(cmd, &cmd);
-            if (num >= 1 && num < 8)
-            {
-                // If a custom panel movement was selected - need to briefly pause before changing light sequence to avoid conflict)
-                if (panelTypeSelected)
-                {
-                    delay(30);
-                }
-                switch (num)
-                {
-                    case 1:
-                        sendMarcCommand("@0T1");
-                        break;              
-                    case 2:
-                        sendMarcCommand("@0T4");
-                        break;              
-                    case 3:
-                        sendMarcCommand("@0T5");
-                        break;
-                    case 4:
-                        sendMarcCommand("@0T6");
-                        break;
-                    case 5:
-                        sendMarcCommand("@0T10");
-                        break;
-                    case 6:
-                        sendMarcCommand("@0T11");
-                        break;
-                    case 7:
-                        sendMarcCommand("@0T92");
-                        break;
-                    case 8:
-                        sendMarcCommand("@0T100");
-                        delay(50);
-                        String custString = "@0M";
-                        custString += LD_text;
-                        sendMarcCommand(custString.c_str());
-                        break;
-                }
-            }
-            else
-            {
-                SHADOW_DEBUG("LD range is 1 - 8 in action command \"%s\"\n", action)
-                return false;
-            }
-        }
-        if (*cmd != ',')
-            break;
-        cmd++;
+
+    // S<number> — allow decimal
+    char* endp = nullptr;
+    long n = strtol(sVal.c_str(), &endp, 10);
+    if (endp && *endp == 0) {
+        _playTrackNumber(n);
+        return true;
     }
-    if (*cmd != '\0')
-    {
-        SHADOW_DEBUG("Ignoring unknown trailing \"%s\" in action \"%s\"\n", cmd, action);
-    }
-    if (panelTypeSelected)
-    {
-        printf("panelTypeSelected\n");
-        sRunningCustRoutine = true;
-    }
+
+    // Mixed input? Take first char as command.
+    _soundLetterCmd(sVal[0]);
     return true;
+}
+
+bool handleMaestroAction(const char* action)
+{
+    // Example accepted inputs:
+    //   "DM58"              -> dome seq 58
+    //   "BM12;S7"           -> body seq 12, then track 7
+    //   "S f"               -> sound command $F
+    //   "DM3;Sf, BM4"       -> (tokenized by commas) DM3+$F, then BM4
+
+    String full = _trimCopy(action);
+    if (full.length() == 0) return false;
+
+    // Split by commas into tokens, process each
+    int start = 0;
+    bool any = false;
+    while (start <= full.length()) {
+        int comma = full.indexOf(',', start);
+        String token = (comma < 0) ? full.substring(start) : full.substring(start, comma);
+        token = _trimCopy(token.c_str());
+        start = (comma < 0) ? (full.length() + 1) : (comma + 1);
+        if (token.length() == 0) continue;
+
+        // Split a token by optional ';' into LEFT(;RIGHT)
+        int semi = token.indexOf(';');
+        String left  = (semi < 0) ? token : token.substring(0, semi);
+        String right = (semi < 0) ? String() : token.substring(semi + 1);
+
+        // Normalize LEFT (DMxx / BMxx) and RIGHT (Sxx / Sx)
+        left.trim(); right.trim();
+
+        // Handle pure sound-only tokens like "S7" or "Sf"
+        if (left.length() >= 1 && (left[0]=='S' || left[0]=='s') && (right.length()==0)) {
+            String sval = left.substring(1); sval.trim();
+            if (_handleSoundSuffix(sval)) any = true;
+            continue;
+        }
+
+       // LEFT must be DMxx or BMxx (accept optional ':' or '=' separators)
+        if (left.length() >= 3) {
+            char c0 = toupper((unsigned char)left[0]);
+            char c1 = toupper((unsigned char)left[1]);
+            if ((c0=='D' || c0=='B') && c1=='M') {
+                const char* p = left.c_str() + 2;
+                // Skip optional separator and whitespace
+                if (*p==':' || *p=='=') ++p;
+                while (*p && _isSpace(*p)) ++p;
+
+                char* endp = nullptr;
+                long seq = strtol(p, &endp, 10);
+                if (endp && seq >= 0 && seq <= 255) {
+                    if (c0=='D') sendDomeMaestroSequence((uint8_t)seq);
+                    else         sendBodyMaestroSequence((uint8_t)seq);
+                    any = true;
+
+                    // Optional RIGHT side "S.." (accept optional ':' or '=')
+                    // Handle pure sound-only tokens like "S7", "S:7", "Sf", "S=f"
+                    if (left.length() >= 1 && (left[0]=='S' || left[0]=='s') && (right.length()==0)) {
+                        String sval = left.substring(1);
+                        sval.trim();
+                        if (sval.length() && (sval[0]==':' || sval[0]=='=')) {
+                            sval.remove(0, 1);
+                            sval.trim();
+                        }
+                        if (_handleSoundSuffix(sval)) any = true;
+                        continue;
+                    }
+                    continue;
+                }
+            }
+        }
+
+
+        // If we reach here, token didn't match our formats — ignore gracefully.
+        SHADOW_DEBUG("Unknown Maestro token \"%s\" in action \"%s\"\n", token.c_str(), action);
+    }
+
+    return any;
 }
 
 // =======================================================================================
@@ -841,7 +616,7 @@ bool handleMarcduinoAction(const char* action)
 // =======================================================================================
 
 #if defined(USE_HCR_VOCALIZER) || defined(USE_MP3_TRIGGER) || defined(USE_DFMINI_PLAYER)
-#define SOUND_DEBUG(...) printf(__VA_ARGS__);
+//#define SOUND_DEBUG(...) printf(__VA_ARGS__);
 #define MARC_SOUND_VOLUME               500     // 0 - 1000
 #define MARC_SOUND_RANDOM               true    // Play random sounds
 #define MARC_SOUND_RANDOM_MIN           1000    // Min wait until random sound
@@ -849,6 +624,7 @@ bool handleMarcduinoAction(const char* action)
 #define MARC_SOUND_STARTUP              255     // Startup sound
 #define MARC_SOUND_PLAYER               MarcSound::kHCR
 #include "MarcduinoSound.h"
+
 #define MARC_SOUND
 #endif
 
@@ -881,7 +657,7 @@ void setup()
         domeAutoSpeed = preferences.getInt(PREFERENCE_DOME_AUTO_SPEED, DEFAULT_AUTO_DOME_SPEED);
         time360DomeTurn = preferences.getInt(PREFERENCE_DOME_DOME_TURN_TIME, DEFAULT_AUTO_DOME_TURN_TIME);
         motorControllerBaudRate = preferences.getInt(PREFERENCE_MOTOR_BAUD, DEFAULT_MOTOR_BAUD);
-        marcDuinoBaudRate = preferences.getInt(PREFERENCE_MARCDUINO_BAUD, DEFAULT_MARCDUINO_BAUD);
+        maestroBaudRate = preferences.getInt(PREFERENCE_MAESTRO_BAUD, DEFAULT_MAESTRO_BAUD);
     }
 #endif
     PrintReelTwoInfo(Serial, "Penumbra Shadow MD");
@@ -904,26 +680,44 @@ void setup()
     DomeMotor->setTimeout(20);      //DMB:  How low can we go for safety reasons?  multiples of 100ms
     // DomeMotor->stop();
 
-    // //Setup for MD_SERIAL MarcDuino Dome Control Board
-    MD_SERIAL_INIT(marcDuinoBaudRate);
+    // //Setup for MAESTRO_SERIAL Pololu Maestro Dome Control Board
+    MAESTRO_SERIAL_INIT(maestroBaudRate);
 
-    //Setup for BODY_MD_SERIAL Optional MarcDuino Control Board for Body Panels
-    BODY_MD_SERIAL_INIT(marcDuinoBaudRate);
+    //Setup for BODY_MAESTRO_SERIAL Optional Pololu Maestro Control Board for Body Panels
+    BODY_MAESTRO_SERIAL_INIT(maestroBaudRate);
 
     // randomSeed(analogRead(0));  // random number seed for dome automation   
 
     SetupEvent::ready();
 
 #if defined(MARC_SOUND_PLAYER)
-    SOUND_SERIAL_INIT(SOUND_SERIAL_BAUD);
-    MarcSound::Module soundPlayer = (MarcSound::Module)preferences.getInt(PREFERENCE_MARCSOUND, MARC_SOUND_PLAYER);
-    int soundStartup = preferences.getInt(PREFERENCE_MARCSOUND_STARTUP, MARC_SOUND_STARTUP);
-    if (!sMarcSound.begin(soundPlayer, SOUND_SERIAL, soundStartup))
-    {
+    MarcSound::Module soundPlayer =
+        (MarcSound::Module)preferences.getInt(PREFERENCE_MARCSOUND, MARC_SOUND_PLAYER);
+
+    int soundStartup =
+        preferences.getInt(PREFERENCE_MARCSOUND_STARTUP, MARC_SOUND_STARTUP);
+
+    // Pick baud by module (all share the same SOUND_SERIAL pins from pin-map.h)
+    uint32_t soundBaud =
+        (soundPlayer == MarcSound::kMP3Trigger_UART) ? 38400 : 9600;
+
+    // (Re)open the shared sound UART at the correct baud
+    // NOTE: SOUND_SERIAL is SoftwareSerial per pin-map.h
+    SOUND_SERIAL.end();                       // safe even if not opened yet
+    SOUND_SERIAL_INIT(soundBaud);             // uses SOUND_SERIAL_RX/TX from pin-map.h
+
+    // Initialize the selected backend on that same stream
+    bool ok = sMarcSound.begin(soundPlayer, SOUND_SERIAL, soundStartup);
+    if (!ok) {
         DEBUG_PRINTLN("FAILED TO INITALIZE SOUND MODULE");
     }
-    sMarcSound.setVolume(preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, MARC_SOUND_VOLUME) / 1000.0);
+
+    // Preferences-driven volume (expects 0..1000 -> 0.0..1.0)
+    sMarcSound.setVolume(
+        preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, MARC_SOUND_VOLUME) / 1000.0f
+    );
 #endif
+
 
     if (Usb.Init() == -1)
     {
@@ -942,8 +736,12 @@ void setup()
 void sendMarcCommand(const char* cmd)
 {
     SHADOW_VERBOSE("Sending MARC: \"%s\"\n", cmd)
-    MD_SERIAL.print(cmd); MD_SERIAL.print("\r");
+    MAESTRO_SERIAL.print(cmd); MAESTRO_SERIAL.print("\r");
+
 #if defined(MARC_SOUND_PLAYER)
+    SHADOW_VERBOSE("Sound CMD: \"%s\"\n", cmd);
+    // Pass-through to sound driver’s $-style parser.
+    // (It safely ignores non-$ strings.)
     sMarcSound.handleCommand(cmd);
 #endif
 }
@@ -951,7 +749,7 @@ void sendMarcCommand(const char* cmd)
 void sendBodyMarcCommand(const char* cmd)
 {
     SHADOW_VERBOSE("Sending BODYMARC: \"%s\"\n", cmd)
-    BODY_MD_SERIAL.print(cmd); BODY_MD_SERIAL.print("\r");
+    BODY_MAESTRO_SERIAL.print(cmd); BODY_MAESTRO_SERIAL.print("\r");
 }
 
 ////////////////////////////////
@@ -978,8 +776,7 @@ void loop()
     domeDrive();
     marcDuinoDome();
     marcDuinoFoot();
-    toggleSettings();
-    custMarcDuinoPanel();     
+    toggleSettings();    
 #if defined(MARC_SOUND_PLAYER)
     sMarcSound.idle();
 #endif
@@ -993,7 +790,7 @@ void loop()
     if (Serial.available())
     {
         int ch = Serial.read();
-        MD_SERIAL.print((char)ch);
+        MAESTRO_SERIAL.print((char)ch);
         if (ch == 0x0A || ch == 0x0D)
         {
             char* cmd = sBuffer;
@@ -1043,33 +840,75 @@ void loop()
                 }
             }
             else if (startswith(cmd, "#SMSOUND"))
-            {
-                bool invalid = false;
-                uint32_t val = strtolu(cmd, &cmd);
-                switch (val)
-                {
-                    case MarcSound::kDisabled:
-                        printf("Sound Disabled.\n");
-                        break;
-                    case MarcSound::kMP3Trigger:
-                        printf("MP3Trigger Enabled.\n");
-                        break;
-                    case MarcSound::kDFMini:
-                        printf("DFMiniPlayer Enabled.\n");
-                        break;
-                    case MarcSound::kHCR:
-                        printf("HCR Vocalizer Enabled.\n");
-                        break;
-                    default:
-                        invalid = true;
-                        printf("Unknown Sound Type: %d\n", val);
-                        break;
-                }
-                if (!invalid)
-                {
-                    preferences.putInt(PREFERENCE_MARCSOUND, val);
-                }
+{
+    // After startswith(...), some of your code paths leave `cmd` at:
+    //   A) just after "#SMSOUND"  (common in this project), OR
+    //   B) at the start of "#SMSOUND" (if startswith didn't advance).
+    //
+    // Normalize: if we still see the literal, skip it once.
+    if (strncasecmp(cmd, "#SMSOUND", 8) == 0) {
+        cmd += 8;
+    }
+
+    // Allow optional whitespace between token and the number
+    while (*cmd == ' ' || *cmd == '\t') ++cmd;
+
+    // Must have at least one digit (0..3)
+    if (!isdigit((unsigned char)*cmd)) {
+        printf("Usage: #SMSOUND0 | #SMSOUND1 | #SMSOUND2 | #SMSOUND3\n");
+        // Move past any non-digit junk to avoid re-triggering on the same spot
+        while (*cmd && *cmd != ',' && *cmd != '\n' && *cmd != '\r') ++cmd;
+        // If you parse comma-separated commands, skip one comma
+        if (*cmd == ',') ++cmd;
+    } else {
+        // Parse the numeric choice and advance cmd to the end of the number
+        char* endp = nullptr;
+        long choice = strtol(cmd, &endp, 10);
+        cmd = endp; // IMPORTANT: advance outer parser
+
+        MarcSound::Module mod  = MarcSound::fromChoice((int)choice);  // 0..3 -> module
+        uint32_t          baud = MarcSound::baudFor(mod);             // 0, 9600, 38400
+
+        // Persist selection
+        preferences.putInt(PREFERENCE_MARCSOUND, (int)mod);
+
+        // Apply immediately
+        sMarcSound.end();
+        SOUND_SERIAL.end();
+
+        if (baud == 0) {
+            printf("Sound Disabled.\n");
+        } else {
+            SOUND_SERIAL_INIT(baud); // pins/mode from pin-map.h
+
+            int startup = preferences.getInt(PREFERENCE_MARCSOUND_STARTUP, MARC_SOUND_STARTUP);
+            if (!sMarcSound.begin(mod, SOUND_SERIAL, startup)) {
+                printf("FAILED TO INITIALIZE SOUND MODULE: %s (baud=%lu)\n",
+                       MarcSound::moduleName(mod), (unsigned long)baud);
+            } else {
+                // Re-apply prefs
+                sMarcSound.setVolume(
+                    preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, MARC_SOUND_VOLUME) / 1000.0f
+                );
+                sMarcSound.setRandomMin(
+                    preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MIN, MARC_SOUND_RANDOM_MIN)
+                );
+                sMarcSound.setRandomMax(
+                    preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MAX, MARC_SOUND_RANDOM_MAX)
+                );
+                if (preferences.getBool(PREFERENCE_MARCSOUND_RANDOM, MARC_SOUND_RANDOM))
+                    sMarcSound.startRandomInSeconds(13);
             }
+        }
+
+        printf("Sound module set to: %s (%lu baud)\n",
+               MarcSound::moduleName(mod), (unsigned long)baud);
+
+        // Optional: skip a trailing comma so the next command parses
+        if (*cmd == ',') ++cmd;
+    }
+}
+
             else if (startswith(cmd, "#SMCONFIG"))
             {
                 printf("Drive Speed Normal:  %3d (#SMNORMALSPEED) [0..127]\n", drivespeed1);
@@ -1084,7 +923,7 @@ void loop()
                 printf("Invert Turn:         %3d (#SMINVERT)      [0..1]\n", invertTurnDirection);
                 printf("Dome Auto Speed:     %3d (#SMAUTOSPEED)   [50..100]\n", domeAutoSpeed);
                 printf("Dome Auto Time:     %4d (#SMAUTOTIME)    [2000..8000]\n", time360DomeTurn);
-                printf("Marcduino Baud:   %6d (#SMMARCBAUD)\n", marcDuinoBaudRate);
+                printf("Maestro Baud:   %6d (#SMMARCBAUD)\n", maestroBaudRate);
                 printf("Motor Baud:       %6d (#SMMOTORBAUD)\n", motorControllerBaudRate);
             }
             else if (startswith(cmd, "#SMSTARTUP"))
@@ -1333,15 +1172,15 @@ void loop()
             else if (startswith(cmd, "#SMMARCBAUD"))
             {
                 uint32_t val = strtolu(cmd, &cmd);
-                if (val == marcDuinoBaudRate)
+                if (val == maestroBaudRate)
                 {
                     printf("Unchanged.\n");
                 }
                 else
                 {
-                    marcDuinoBaudRate = val;
-                    preferences.putInt(PREFERENCE_MARCDUINO_BAUD, marcDuinoBaudRate);
-                    printf("Marcduino Serial Baud Rate Changed. Needs Reboot.\n");
+                    maestroBaudRate = val;
+                    preferences.putInt(PREFERENCE_MAESTRO_BAUD, maestroBaudRate);
+                    printf("Maestro Serial Baud Rate Changed. Needs Reboot.\n");
                 }
             }
             else if (startswith(cmd, "#SMPLAY"))
@@ -1398,14 +1237,14 @@ void loop()
     }
 
     // Clear inbound buffer of any data sent form the MarcDuino board
-    if (MD_SERIAL.available())
+    if (MAESTRO_SERIAL.available())
     {
-        int ch = MD_SERIAL.read();
+        int ch = MAESTRO_SERIAL.read();
         Serial.print((char)ch);
     }
-    if (BODY_MD_SERIAL.available())
+    if (BODY_MAESTRO_SERIAL.available())
     {
-        int ch = BODY_MD_SERIAL.read();
+        int ch = BODY_MAESTRO_SERIAL.read();
         Serial.print((char)ch);
     }
 }
@@ -2099,43 +1938,6 @@ void marcDuinoDome()
     {
         FTbtnRight_PS_MD.trigger();
         return;
-    }
-}
-
-
-// =======================================================================================
-// This function handles the processing of custom MarcDuino panel routines
-// =======================================================================================
-void custMarcDuinoPanel()
-{
-    if (!sRunningCustRoutine)
-        return;
-    sRunningCustRoutine = false;
-    for (int i = 0; i < SizeOfArray(sPanelStatus); i++)
-    {
-        PanelStatus &panel = sPanelStatus[i];
-        if (panel.fStatus == 1)
-        {
-            if (panel.fStartTime + panel.fStartDelay * 1000 < millis())
-            {
-                char cmd[10];
-                snprintf(cmd, sizeof(cmd), ":OP%02d", i+1);
-                sendMarcCommand(cmd);
-                panel.fStatus = 2;
-            }
-        }
-        else if (panel.fStatus == 2)
-        {
-            if (panel.fStartTime + (panel.fStartDelay + panel.fDuration) * 1000 < millis())
-            {
-                char cmd[10];
-                snprintf(cmd, sizeof(cmd), ":CL%02d", i+1);
-                sendMarcCommand(cmd);
-                panel.fStatus = 0;
-            }
-        }
-        if (panel.fStatus != 0)
-            sRunningCustRoutine = true;
     }
 }
 

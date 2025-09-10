@@ -21,11 +21,11 @@
 #define OUTPUT_ENABLE_PIN       27
 #define RS485_RTS_PIN           26
 
-#define MD_SERIAL_RX            RXD1_PIN
-#define MD_SERIAL_TX            TXD1_PIN
+#define MAESTRO_SERIAL_RX            RXD1_PIN
+#define MAESTRO_SERIAL_TX            TXD1_PIN
 
-#define BODY_MD_SERIAL_RX       RXD2_PIN
-#define BODY_MD_SERIAL_TX       TXD2_PIN
+#define BODY_MAESTRO_SERIAL_RX       RXD2_PIN
+#define BODY_MAESTRO_SERIAL_TX       TXD2_PIN
 
 #define MOTOR_SERIAL_RX         RXD3_PIN
 #define MOTOR_SERIAL_TX         TXD3_PIN
@@ -33,13 +33,13 @@
 #define SOUND_SERIAL_TX         DOUT1_PIN
 #define SOUND_SERIAL_RX         DIN2_PIN
 
-#define MD_SERIAL               Serial1
+#define MAESTRO_SERIAL               Serial1
 #define MOTOR_SERIAL            motorSerial
-#define BODY_MD_SERIAL          Serial2
+#define BODY_MAESTRO_SERIAL          Serial2
 #define SOUND_SERIAL            soundSerial
 
-#define MD_SERIAL_INIT(baud)         MD_SERIAL.begin(baud, SERIAL_8N1, MD_SERIAL_RX, MD_SERIAL_TX)
-#define BODY_MD_SERIAL_INIT(baud)    BODY_MD_SERIAL.begin(baud, SERIAL_8N1, BODY_MD_SERIAL_RX, BODY_MD_SERIAL_TX)
+#define MAESTRO_SERIAL_INIT(baud)         MAESTRO_SERIAL.begin(baud, SERIAL_8N1, MAESTRO_SERIAL_RX, MAESTRO_SERIAL_TX)
+#define BODY_MAESTRO_SERIAL_INIT(baud)    BODY_MAESTRO_SERIAL.begin(baud, SERIAL_8N1, BODY_MAESTRO_SERIAL_RX, BODY_MAESTRO_SERIAL_TX)
 #define MOTOR_SERIAL_INIT(baud)      MOTOR_SERIAL.begin(baud, SWSERIAL_8N1, -1, MOTOR_SERIAL_TX, false)
 #define SOUND_SERIAL_INIT(baud)      { SOUND_SERIAL.begin(baud, SWSERIAL_8N1, SOUND_SERIAL_RX, SOUND_SERIAL_TX, false); delay(1500); }
 
