@@ -355,6 +355,53 @@ int maestroBaudRate = DEFAULT_MAESTRO_BAUD;
 static unsigned sPos;
 static char sBuffer[CONSOLE_BUFFER_SIZE];
 
+//---------------------------------------------------------------------------------------
+//                          Command Parsing Helpers
+//---------------------------------------------------------------------------------------
+
+static inline void _skip_ws(char*& p) {
+  while (*p == ' ' || *p == '\t') ++p;
+}
+
+// Works whether your existing startswith() advances cmd or not.
+// After matching, it ensures `cmd` points to the first non-space character *after* the token.
+static bool matchCmd(char*& cmd, const char* token) {
+  if (!startswith(cmd, token)) return false;                   // may or may not advance
+  size_t n = strlen(token);
+  if (strncasecmp(cmd, token, n) == 0) cmd += n;               // if not advanced, advance now
+  _skip_ws(cmd);                                               // allow optional whitespace
+  return true;
+}
+
+// Parse a (signed) long integer argument right after the (optional-space) token.
+// On success, advances cmd to the first non-digit that follows.
+static bool parseLongArg(char*& cmd, long& out) {
+  _skip_ws(cmd);
+  if (!isdigit((unsigned char)*cmd) && *cmd != '-' && *cmd != '+') return false;
+  char* endp = nullptr;
+  long v = strtol(cmd, &endp, 10);
+  if (endp == cmd) return false;
+  cmd = endp;
+  out = v;
+  return true;
+}
+
+// Parse an unsigned int in range [min..max], print usage on failure (optional).
+static bool parseUIntInRange(char*& cmd, uint32_t& out, uint32_t minV, uint32_t maxV,
+                             const char* usage = nullptr) {
+  long tmp = 0;
+  if (!parseLongArg(cmd, tmp) || tmp < (long)minV || tmp > (long)maxV) {
+    if (usage && *usage) printf("%s\n", usage);
+    return false;
+  }
+  out = (uint32_t)tmp;
+  return true;
+}
+
+// Convenience macro so branches read nicely:
+#define CMD(TOK) else if (matchCmd(cmd, TOK))
+
+
 // ---------------------------------------------------------------------------------------
 //                    NeoPixels on Pin 13
 // ---------------------------------------------------------------------------------------
@@ -415,6 +462,7 @@ bool handleSMSOUND(const char* bracketArg)
     SOUND_SERIAL.end();
     if (baud) SOUND_SERIAL_INIT(baud);        // uses your pin-map.h macros
     if (baud) sMarcSound.begin(mod, SOUND_SERIAL, /*startupSound*/ -1);
+    
 
     DEBUG_PRINTF("Sound module: %s (%d baud)\n", MarcSound::moduleName(mod), (int)baud);
     return true;
@@ -665,7 +713,7 @@ bool handleMaestroAction(const char* action)
 #define MARC_SOUND_RANDOM_MIN           1000    // Min wait until random sound
 #define MARC_SOUND_RANDOM_MAX           10000   // Max wait until random sound
 #define MARC_SOUND_STARTUP              255     // Startup sound
-#define MARC_SOUND_PLAYER               MarcSound::kHCR
+#define MARC_SOUND_PLAYER               MarcSound::kMP3Trigger_UART  // Default sound module
 #include "MarcduinoSound.h"
 
 #define MARC_SOUND
@@ -760,25 +808,31 @@ void setup()
 
     uint32_t soundBaud = (soundPlayer == MarcSound::kMP3Trigger_UART) ? 38400 : 9600;
     SOUND_SERIAL.end();
-    SOUND_SERIAL_INIT(soundBaud);
+    if (soundBaud) SOUND_SERIAL_INIT(soundBaud);
 
-    bool ok = sMarcSound.begin(soundPlayer, SOUND_SERIAL, soundStartup);
+    bool ok = soundBaud ? sMarcSound.begin(soundPlayer, SOUND_SERIAL, soundStartup) : false;
     if (!ok) {
         DEBUG_PRINTLN("FAILED TO INITALIZE SOUND MODULE");
     }
 
-    // ---- SINGLE, sane volume set here ----
-    int vol = preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, 850); // default mid-range
-    if (vol < 50) vol = 1000;                                        // guard against “silent” boots
-    sMarcSound.setVolume(vol / 1000.0f);
-
-    // Then use sounds
-    sMarcSound.playStartSound();
+    // --- Apply prefs (volume, random intervals) ---
+    int volPref = preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, 700);
+    if (volPref < 50) volPref = 700;
+    sMarcSound.setVolume(volPref / 1000.0f);
     sMarcSound.setRandomMin(preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MIN, MARC_SOUND_RANDOM_MIN));
     sMarcSound.setRandomMax(preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MAX, MARC_SOUND_RANDOM_MAX));
+
+    // --- Play startup sound ---
+    if (soundStartup > 0) {
+        delay(150); // let the player settle after init + volume
+        sMarcSound.playSound(0, (uint8_t)soundStartup);
+    }
+
+    // --- Start random sounds if enabled ---
     if (preferences.getBool(PREFERENCE_MARCSOUND_RANDOM, MARC_SOUND_RANDOM))
         sMarcSound.startRandomInSeconds(13);
 #endif
+
 
 }
 
@@ -896,123 +950,80 @@ void loop()
         if (ch == 0x0A || ch == 0x0D)
         {
             char* cmd = sBuffer;
-            if (startswith(cmd, "#SMZERO"))
+           
+            if (matchCmd(cmd, "#SMZERO"))
             {
                 preferences.clear();
                 DEBUG_PRINT("Clearing preferences. ");
                 reboot();
             }
-            else if (startswith(cmd, "#SMRESTART"))
+            CMD("#SMRESTART")
             {
                 reboot();
             }
-            else if (startswith(cmd, "#SMLIST"))
+            CMD("#SMLIST")
             {
                 printf("Button Actions\n");
                 printf("-----------------------------------\n");
                 MarcduinoButtonAction::listActions();
             }
-            else if (startswith(cmd, "#SMDEL"))
+            CMD("#SMDEL")
             {
-                String key(cmd);
-                key.trim();
+                String key(cmd); key.trim();
                 MarcduinoButtonAction* btn = MarcduinoButtonAction::findAction(key);
-                if (btn != nullptr)
-                {
+                if (btn) {
                     btn->reset();
                     printf("Trigger: %s reset to default %s\n", btn->name().c_str(), btn->action().c_str());
-                }
-                else
-                {
+                } else {
                     printf("Trigger Not Found: %s\n", key.c_str());
                 }
             }
-            else if (startswith(cmd, "#SMVOLUME"))
+            CMD("#SMVOLUME")
             {
-                long v = (long)strtolu(cmd, &cmd);     // 0..1000
-                if (v < 0)    v = 0;
-                if (v > 1000) v = 1000;
-
-                preferences.putInt(PREFERENCE_MARCSOUND_VOLUME, (int)v);
-
-                // Linear mapping: 0..1000 -> 0.0..1.0
-                sMarcSound.setVolume(v / 1000.0f);
-
-                printf("Sound Volume: %ld (%.0f%%)\n", v, (v / 10.0f));
-            }
-
-            else if (startswith(cmd, "#SMSOUND"))
-            {
-                // After startswith(...), some of your code paths leave `cmd` at:
-                //   A) just after "#SMSOUND"  (common in this project), OR
-                //   B) at the start of "#SMSOUND" (if startswith didn't advance).
-                //
-                // Normalize: if we still see the literal, skip it once.
-                if (strncasecmp(cmd, "#SMSOUND", 8) == 0) {
-                    cmd += 8;
+                uint32_t val;
+                if (parseUIntInRange(cmd, val, 0, 1000, "Usage: #SMVOLUME <0..1000>")) {
+                    preferences.putInt(PREFERENCE_MARCSOUND_VOLUME, (int)val);
+                    sMarcSound.setVolume(val / 1000.0f);              // linear mapping
+                    printf("Sound Volume: %u (%.0f%%)\n", val, val / 10.0f);
                 }
-
-                // Allow optional whitespace between token and the number
-                while (*cmd == ' ' || *cmd == '\t') ++cmd;
-
-                // Must have at least one digit (0..3)
-                if (!isdigit((unsigned char)*cmd)) {
+            }
+            CMD("#SMSOUND")
+            {
+                long choice;
+                if (!parseLongArg(cmd, choice)) {
                     printf("Usage: #SMSOUND0 | #SMSOUND1 | #SMSOUND2 | #SMSOUND3\n");
-                    // Move past any non-digit junk to avoid re-triggering on the same spot
-                    while (*cmd && *cmd != ',' && *cmd != '\n' && *cmd != '\r') ++cmd;
-                    // If you parse comma-separated commands, skip one comma
-                    if (*cmd == ',') ++cmd;
                 } else {
-                    // Parse the numeric choice and advance cmd to the end of the number
-                    char* endp = nullptr;
-                    long choice = strtol(cmd, &endp, 10);
-                    cmd = endp; // IMPORTANT: advance outer parser
+                    MarcSound::Module mod  = MarcSound::fromChoice((int)choice);
+                    uint32_t          baud = MarcSound::baudFor(mod);
 
-                    MarcSound::Module mod  = MarcSound::fromChoice((int)choice);  // 0..3 -> module
-                    uint32_t          baud = MarcSound::baudFor(mod);             // 0, 9600, 38400
-
-                    // Persist selection
                     preferences.putInt(PREFERENCE_MARCSOUND, (int)mod);
 
-                    // Apply immediately
                     sMarcSound.end();
                     SOUND_SERIAL.end();
-
-                    if (baud == 0) {
-                        printf("Sound Disabled.\n");
-                    } else {
-                        SOUND_SERIAL_INIT(baud); // pins/mode from pin-map.h
-
+                    if (baud) {
+                        SOUND_SERIAL_INIT(baud);
                         int startup = preferences.getInt(PREFERENCE_MARCSOUND_STARTUP, MARC_SOUND_STARTUP);
                         if (!sMarcSound.begin(mod, SOUND_SERIAL, startup)) {
                             printf("FAILED TO INITIALIZE SOUND MODULE: %s (baud=%lu)\n",
                                 MarcSound::moduleName(mod), (unsigned long)baud);
                         } else {
-                            // Re-apply prefs
-                            sMarcSound.setVolume(
-                                preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, MARC_SOUND_VOLUME) / 1000.0f
-                            );
-                            sMarcSound.setRandomMin(
-                                preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MIN, MARC_SOUND_RANDOM_MIN)
-                            );
-                            sMarcSound.setRandomMax(
-                                preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MAX, MARC_SOUND_RANDOM_MAX)
-                            );
+                            int volPref = preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, 700);
+                            if (volPref < 50) volPref = 700;
+                            sMarcSound.setVolume(volPref / 1000.0f);
+                            sMarcSound.setRandomMin(preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MIN, MARC_SOUND_RANDOM_MIN));
+                            sMarcSound.setRandomMax(preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MAX, MARC_SOUND_RANDOM_MAX));
                             if (preferences.getBool(PREFERENCE_MARCSOUND_RANDOM, MARC_SOUND_RANDOM))
                                 sMarcSound.startRandomInSeconds(13);
                         }
+                    } else {
+                        printf("Sound Disabled.\n");
                     }
-
                     printf("Sound module set to: %s (%lu baud)\n",
                         MarcSound::moduleName(mod), (unsigned long)baud);
-
-                    // Optional: skip a trailing comma so the next command parses
-                    if (*cmd == ',') ++cmd;
                 }
             }
-            else if (startswith(cmd, "#SMCONFIG"))
+            CMD("#SMCONFIG")
             {
-                // Current sound settings
                 MarcSound::Module smod = (MarcSound::Module)preferences.getInt(PREFERENCE_MARCSOUND, MARC_SOUND_PLAYER);
                 int vol   = preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, MARC_SOUND_VOLUME);
                 int start = preferences.getInt(PREFERENCE_MARCSOUND_STARTUP, MARC_SOUND_STARTUP);
@@ -1020,10 +1031,8 @@ void loop()
                 int rmin  = preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MIN, MARC_SOUND_RANDOM_MIN);
                 int rmax  = preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MAX, MARC_SOUND_RANDOM_MAX);
 
-                printf("\nConfiguration\n");
+                printf("Configuration\n");
                 printf("-----------------------------------\n");
-
-                // Sound section
                 printf("Sound Module:        %s   (#SMSOUND0/1/2/3)\n", MarcSound::moduleName(smod));
                 printf("Sound Volume:        %4d (#SMVOLUME)         [0..1000]\n", vol);
                 printf("Startup Sound:       %4d (#SMSTARTUP)        [-1 disable | track]\n", start);
@@ -1031,7 +1040,6 @@ void loop()
                 printf("Random Min Delay:    %4d (#SMRANDMIN)        [ms]\n", rmin);
                 printf("Random Max Delay:    %4d (#SMRANDMAX)        [ms]\n", rmax);
 
-                // Motion / control (fixed duplicate and kept names)
                 printf("Drive Speed Normal:  %3d (#SMNORMALSPEED)    [0..127]\n", drivespeed1);
                 printf("Drive Speed Max:     %3d (#SMMAXSPEED)       [0..127]\n", drivespeed2);
                 printf("Turn Speed:          %3d (#SMTURNSPEED)      [0..127]\n", turnspeed);
@@ -1043,368 +1051,232 @@ void loop()
                 printf("Invert Turn:         %3d (#SMINVERT)         [0..1]\n", invertTurnDirection);
                 printf("Dome Auto Speed:     %3d (#SMAUTOSPEED)      [50..100]\n", domeAutoSpeed);
                 printf("Dome Auto Time:     %4d (#SMAUTOTIME)       [2000..8000 ms]\n", time360DomeTurn);
-
-                // Serial rates
                 printf("Maestro Baud:     %6d (#SMMARCBAUD)\n", maestroBaudRate);
                 printf("Motor Baud:       %6d (#SMMOTORBAUD)\n", motorControllerBaudRate);
-               
-                // NeoPixel settings
+
+                // (If using NeoPixel helpers)
                 printf("NeoPixels Enabled:   %3d (#SMNEOON/#SMNEOOFF)\n", neopixelEnabled ? 1 : 0);
                 printf("NeoPixel Count:      %3d (#SMNEOCOUNT)\n", neopixelCount);
-                printf("NeoPixel Color:   R=%3d G=%3d B=%3d (#SMNEOCOLOR <r> <g> <b>)\n",
-                    neopixelR, neopixelG, neopixelB);
-
+                printf("NeoPixel Color:   R=%3d G=%3d B=%3d (#SMNEOCOLOR <r> <g> <b>)\n", neopixelR, neopixelG, neopixelB);
             }
-            else if (startswith(cmd, "#SMSTARTUP"))
+            CMD("#SMSTARTUP")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                preferences.putInt(PREFERENCE_MARCSOUND_STARTUP, val);
-                printf("Startup Sound: %d\n", val);
+                long v;
+                if (parseLongArg(cmd, v)) {
+                    preferences.putInt(PREFERENCE_MARCSOUND_STARTUP, (int)v);
+                    printf("Startup Sound: %ld\n", v);
+                } else {
+                    printf("Usage: #SMSTARTUP <track|-1>\n");
+                }
             }
-            else if (startswith(cmd, "#SMRANDMIN"))
+            CMD("#SMRANDMIN")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                preferences.putInt(PREFERENCE_MARCSOUND_RANDOM_MIN, val);
-                printf("Random Min: %d\n", val);
-                sMarcSound.setRandomMin(val);
+                uint32_t v;
+                if (parseUIntInRange(cmd, v, 0, 60000, "Usage: #SMRANDMIN <ms>")) {
+                    preferences.putInt(PREFERENCE_MARCSOUND_RANDOM_MIN, (int)v);
+                    sMarcSound.setRandomMin(v);
+                    printf("Random Min: %u\n", v);
+                }
             }
-            else if (startswith(cmd, "#SMRANDMAX"))
+            CMD("#SMRANDMAX")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                preferences.putInt(PREFERENCE_MARCSOUND_RANDOM_MAX, val);
-                printf("Random Max: %d\n", val);
-                sMarcSound.setRandomMax(val);
+                uint32_t v;
+                if (parseUIntInRange(cmd, v, 0, 60000, "Usage: #SMRANDMAX <ms>")) {
+                    preferences.putInt(PREFERENCE_MARCSOUND_RANDOM_MAX, (int)v);
+                    sMarcSound.setRandomMax(v);
+                    printf("Random Max: %u\n", v);
+                }
             }
-            else if (startswith(cmd, "#SMRAND0"))
+            CMD("#SMRAND0")
             {
                 preferences.putInt(PREFERENCE_MARCSOUND_RANDOM, false);
-                printf("Random Disabled.\n");
                 sMarcSound.stopRandom();
+                printf("Random Disabled.\n");
             }
-            else if (startswith(cmd, "#SMRAND1"))
+            CMD("#SMRAND1")
             {
                 preferences.putBool(PREFERENCE_MARCSOUND_RANDOM, true);
-                printf("Random Enabled.\n");
                 sMarcSound.startRandom();
+                printf("Random Enabled.\n");
             }
-            else if (startswith(cmd, "#SMNORMALSPEED"))
+            CMD("#SMNORMALSPEED")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                if (val == drivespeed1)
-                {
-                    printf("Unchanged.\n");
-                }
-                else if (val <= 127)
-                {
-                    drivespeed1 = val;
-                    preferences.putInt(PREFERENCE_SPEED_NORMAL, drivespeed1);
-                    printf("Normal Speed Changed.\n");
-                }
-                else
-                {
-                    printf("Must be in range 0-127\n");
-                }
+                uint32_t v;
+                if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMNORMALSPEED <0..127>")) {}
+                else if (v == (uint32_t)drivespeed1) printf("Unchanged.\n");
+                else { drivespeed1 = v; preferences.putInt(PREFERENCE_SPEED_NORMAL, drivespeed1); printf("Normal Speed Changed.\n"); }
             }
-            else if (startswith(cmd, "#SMMAXSPEED"))
+            CMD("#SMMAXSPEED")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                if (val == drivespeed2)
-                {
-                    printf("Unchanged.\n");
-                }
-                else if (val <= 127)
-                {
-                    drivespeed2 = val;
-                    preferences.putInt(PREFERENCE_SPEED_OVER_THROTTLE, drivespeed2);
-                    printf("Max Speed Changed.\n");
-                }
-                else
-                {
-                    printf("Must be in range 0-127\n");
-                }
+                uint32_t v;
+                if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMMAXSPEED <0..127>")) {}
+                else if (v == (uint32_t)drivespeed2) printf("Unchanged.\n");
+                else { drivespeed2 = v; preferences.putInt(PREFERENCE_SPEED_OVER_THROTTLE, drivespeed2); printf("Max Speed Changed.\n"); }
             }
-            else if (startswith(cmd, "#SMTURNSPEED"))
+            CMD("#SMTURNSPEED")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                if (val == turnspeed)
-                {
-                    printf("Unchanged.\n");
-                }
-                else if (val <= 127)
-                {
-                    turnspeed = val;
-                    preferences.putInt(PREFERENCE_TURN_SPEED, turnspeed);
-                    printf("Turn Speed Changed.\n");
-                }
-                else
-                {
-                    printf("Must be in range 0-127\n");
-                }
+                uint32_t v;
+                if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMTURNSPEED <0..127>")) {}
+                else if (v == (uint32_t)turnspeed) printf("Unchanged.\n");
+                else { turnspeed = v; preferences.putInt(PREFERENCE_TURN_SPEED, turnspeed); printf("Turn Speed Changed.\n"); }
             }
-            else if (startswith(cmd, "#SMDOMESPEED"))
+            CMD("#SMDOMESPEED")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                if (val == domespeed)
-                {
-                    printf("Unchanged.\n");
-                }
-                else if (val <= 127)
-                {
-                    domespeed = val;
-                    preferences.putInt(PREFERENCE_DOME_SPEED, val);
-                    printf("Dome Speed Changed.\n");
-                }
-                else
-                {
-                    printf("Must be in range 0-127\n");
-                }
+                uint32_t v;
+                if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMDOMESPEED <0..127>")) {}
+                else if (v == (uint32_t)domespeed) printf("Unchanged.\n");
+                else { domespeed = v; preferences.putInt(PREFERENCE_DOME_SPEED, v); printf("Dome Speed Changed.\n"); }
             }
-            else if (startswith(cmd, "#SMRAMPING"))
+            CMD("#SMRAMPING")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                if (val == ramping)
-                {
-                    printf("Unchanged.\n");
-                }
-                else if (val <= 10)
-                {
-                    ramping = val;
-                    preferences.putInt(PREFERENCE_RAMPING, ramping);
-                    printf("Ramping Changed.\n");
-                }
-                else
-                {
-                    printf("Must be in range 0-10\n");
-                }
+                uint32_t v;
+                if (!parseUIntInRange(cmd, v, 0, 10, "Usage: #SMRAMPING <0..10>")) {}
+                else if (v == (uint32_t)ramping) printf("Unchanged.\n");
+                else { ramping = v; preferences.putInt(PREFERENCE_RAMPING, ramping); printf("Ramping Changed.\n"); }
             }
-            else if (startswith(cmd, "#SMFOOTDB"))
+            CMD("#SMFOOTDB")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                if (val == joystickFootDeadZoneRange)
-                {
-                    printf("Unchanged.\n");
-                }
-                else if (val <= 127)
-                {
-                    joystickFootDeadZoneRange = val;
-                    preferences.putInt(PREFERENCE_FOOTSTICK_DEADBAND, joystickFootDeadZoneRange);
-                    printf("Foot Joystick Deadband Changed.\n");
-                }
-                else
-                {
-                    printf("Must be in range 0-127\n");
-                }
+                uint32_t v;
+                if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMFOOTDB <0..127>")) {}
+                else if (v == (uint32_t)joystickFootDeadZoneRange) printf("Unchanged.\n");
+                else { joystickFootDeadZoneRange = v; preferences.putInt(PREFERENCE_FOOTSTICK_DEADBAND, joystickFootDeadZoneRange); printf("Foot Joystick Deadband Changed.\n"); }
             }
-            else if (startswith(cmd, "#SMDOMEDB"))
+            CMD("#SMDOMEDB")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                if (val == joystickDomeDeadZoneRange)
-                {
-                    printf("Unchanged.\n");
-                }
-                else if (val <= 127)
-                {
-                    joystickDomeDeadZoneRange = val;
-                    preferences.putInt(PREFERENCE_DOMESTICK_DEADBAND, joystickDomeDeadZoneRange);
-                    printf("Dome Joystick Deadband Changed.\n");
-                }
-                else
-                {
-                    printf("Must be in range 0-127\n");
-                }
+                uint32_t v;
+                if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMDOMEDB <0..127>")) {}
+                else if (v == (uint32_t)joystickDomeDeadZoneRange) printf("Unchanged.\n");
+                else { joystickDomeDeadZoneRange = v; preferences.putInt(PREFERENCE_DOMESTICK_DEADBAND, joystickDomeDeadZoneRange); printf("Dome Joystick Deadband Changed.\n"); }
             }
-            else if (startswith(cmd, "#SMDRIVEDB"))
+            CMD("#SMDRIVEDB")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                if (val == driveDeadBandRange)
-                {
-                    printf("Unchanged.\n");
-                }
-                else if (val <= 127)
-                {
-                    driveDeadBandRange = val;
-                    preferences.putInt(PREFERENCE_DRIVE_DEADBAND, driveDeadBandRange);
-                    printf("Drive Controller Deadband Changed.\n");
-                }
-                else
-                {
-                    printf("Must be in range 0-127\n");
-                }
+                uint32_t v;
+                if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMDRIVEDB <0..127>")) {}
+                else if (v == (uint32_t)driveDeadBandRange) printf("Unchanged.\n");
+                else { driveDeadBandRange = v; preferences.putInt(PREFERENCE_DRIVE_DEADBAND, driveDeadBandRange); printf("Drive Controller Deadband Changed.\n"); }
             }
-            else if (startswith(cmd, "#SMINVERT"))
+            CMD("#SMINVERT")
             {
-                bool invert = (strtolu(cmd, &cmd) == 1);
-                if (invert == invertTurnDirection)
-                {
-                    printf("Unchanged.\n");
-                }
-                else
-                {
-                    invertTurnDirection = invert;
-                    preferences.putInt(PREFERENCE_INVERT_TURN_DIRECTION, invertTurnDirection);
-                    if (invert)
-                        printf("Invert Turn Direction Enabled.\n");
-                    else
-                        printf("Invert Turn Direction Disabled.\n");
-                }
+                long v;
+                if (!parseLongArg(cmd, v)) { printf("Usage: #SMINVERT <0|1>\n"); }
+                else if ((bool)v == invertTurnDirection) printf("Unchanged.\n");
+                else { invertTurnDirection = (bool)v; preferences.putInt(PREFERENCE_INVERT_TURN_DIRECTION, invertTurnDirection);
+                    printf("Invert Turn Direction %s.\n", invertTurnDirection ? "Enabled" : "Disabled"); }
             }
-            else if (startswith(cmd, "#SMAUTOSPEED"))
+            CMD("#SMAUTOSPEED")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                if (val == domeAutoSpeed)
-                {
-                    printf("Unchanged.\n");
-                }
-                else if (val <= 100)
-                {
-                    domeAutoSpeed = val;
-                    preferences.putInt(PREFERENCE_DOME_AUTO_SPEED, domeAutoSpeed);
-                    printf("Auto Dome Speed Changed.\n");
-                }
-                else
-                {
-                    printf("Must be in range 50-100\n");
-                }
+                uint32_t v;
+                if (!parseUIntInRange(cmd, v, 50, 100, "Usage: #SMAUTOSPEED <50..100>")) {}
+                else if (v == (uint32_t)domeAutoSpeed) printf("Unchanged.\n");
+                else { domeAutoSpeed = v; preferences.putInt(PREFERENCE_DOME_AUTO_SPEED, domeAutoSpeed); printf("Auto Dome Speed Changed.\n"); }
             }
-            else if (startswith(cmd, "#SMAUTOTIME"))
+            CMD("#SMAUTOTIME")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                if (val == time360DomeTurn)
-                {
-                    printf("Unchanged.\n");
-                }
-                else if (val <= 8000)
-                {
-                    time360DomeTurn = val;
-                    preferences.putInt(PREFERENCE_DOME_DOME_TURN_TIME, time360DomeTurn);
-                    printf("Auto Dome Turn Time Changed.\n");
-                }
-                else
-                {
-                    printf("Must be in range 0-127\n");
-                }
+                uint32_t v;
+                if (!parseUIntInRange(cmd, v, 0, 8000, "Usage: #SMAUTOTIME <0..8000>")) {}
+                else if (v == (uint32_t)time360DomeTurn) printf("Unchanged.\n");
+                else { time360DomeTurn = v; preferences.putInt(PREFERENCE_DOME_DOME_TURN_TIME, time360DomeTurn); printf("Auto Dome Turn Time Changed.\n"); }
             }
-            else if (startswith(cmd, "#SMMOTORBAUD"))
+            CMD("#SMMOTORBAUD")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                if (val == motorControllerBaudRate)
-                {
-                    printf("Unchanged.\n");
-                }
-                else
-                {
-                    motorControllerBaudRate = val;
-                    preferences.putInt(PREFERENCE_MOTOR_BAUD, motorControllerBaudRate);
-                    printf("Motor Controller Serial Baud Rate Changed. Needs Reboot.\n");
-                }
+                long v;
+                if (parseLongArg(cmd, v)) {
+                    if (v == motorControllerBaudRate) printf("Unchanged.\n");
+                    else { motorControllerBaudRate = (int)v; preferences.putInt(PREFERENCE_MOTOR_BAUD, motorControllerBaudRate);
+                        printf("Motor Controller Serial Baud Rate Changed. Needs Reboot.\n"); }
+                } else printf("Usage: #SMMOTORBAUD <baud>\n");
             }
-            else if (startswith(cmd, "#SMMARCBAUD"))
+            CMD("#SMMARCBAUD")
             {
-                uint32_t val = strtolu(cmd, &cmd);
-                if (val == maestroBaudRate)
-                {
-                    printf("Unchanged.\n");
-                }
-                else
-                {
-                    maestroBaudRate = val;
-                    preferences.putInt(PREFERENCE_MAESTRO_BAUD, maestroBaudRate);
-                    printf("Maestro Serial Baud Rate Changed. Needs Reboot.\n");
-                }
+                long v;
+                if (parseLongArg(cmd, v)) {
+                    if (v == maestroBaudRate) printf("Unchanged.\n");
+                    else { maestroBaudRate = (int)v; preferences.putInt(PREFERENCE_MAESTRO_BAUD, maestroBaudRate);
+                        printf("Maestro Serial Baud Rate Changed. Needs Reboot.\n"); }
+                } else printf("Usage: #SMMARCBAUD <baud>\n");
             }
-            else if (startswith(cmd, "#SMPLAY"))
+            CMD("#SMPLAY")
             {
-                String key(cmd);
-                key.trim();
+                String key(cmd); key.trim();
                 MarcduinoButtonAction* btn = MarcduinoButtonAction::findAction(key);
-                if (btn != nullptr)
-                {
-                    btn->trigger();
-                }
-                else
-                {
-                    printf("Trigger Not Found: %s\n", key.c_str());
-                }
+                if (btn) btn->trigger();
+                else printf("Trigger Not Found: %s\n", key.c_str());
             }
-            else if (startswith(cmd, "#SMSET"))
+            CMD("#SMSET")
             {
-                // Skip whitespace
-                while (*cmd == ' ')
-                    cmd++;
+                _skip_ws(cmd);
                 char* keyp = cmd;
                 char* valp = strchr(cmd, ' ');
-                if (valp != nullptr)
-                {
+                if (valp) {
                     *valp++ = '\0';
-                    String key(keyp);
-                    key.trim();
+                    String key(keyp); key.trim();
                     MarcduinoButtonAction* btn = MarcduinoButtonAction::findAction(key);
-                    if (btn != nullptr)
-                    {
-                        String action(valp);
-                        action.trim();
+                    if (btn) {
+                        String action(valp); action.trim();
                         btn->setAction(action);
                         printf("Trigger: %s set to %s\n", key.c_str(), action.c_str());
-                    }
-                    else
-                    {
+                    } else {
                         printf("Trigger Not Found: %s\n", key.c_str());
                     }
-                }
-            }
-            else if (startswith(cmd, "#SMHELP"))
-            {
-                printSMHelp();
-            }
-            else if (startswith(cmd, "#SMNEOCOUNT"))
-            {
-                uint32_t val = strtolu(cmd, &cmd);
-                if (val > 300) { // safety limit
-                    printf("Too many NeoPixels (max 300).\n");
                 } else {
-                    initNeoPixels(val);
-                    preferences.putInt("neocount", val);
-                    printf("NeoPixel count set to %d\n", neopixelCount);
-                    refreshNeoPixels();
+                    printf("Usage: #SMSET <TriggerName> <Action>\n");
                 }
             }
-            else if (startswith(cmd, "#SMNEOCOLOR"))
-            {
-                uint32_t r = strtolu(cmd, &cmd);
-                uint32_t g = strtolu(cmd, &cmd);
-                uint32_t b = strtolu(cmd, &cmd);
-
-                if (r > 255 || g > 255 || b > 255) {
-                    printf("RGB values must be 0–255\n");
-                } else {
-                    neopixelR = r; neopixelG = g; neopixelB = b;
-                    preferences.putInt("neor", neopixelR);
-                    preferences.putInt("neog", neopixelG);
-                    preferences.putInt("neob", neopixelB);
-                    printf("NeoPixel color set to R=%d G=%d B=%d\n", neopixelR, neopixelG, neopixelB);
-                    refreshNeoPixels();
-                }
-            }
-            else if (startswith(cmd, "#SMNEOON"))
+            CMD("#SMNEOON")
             {
                 neopixelEnabled = true;
                 preferences.putBool("neoenable", true);
-                printf("NeoPixels enabled.\n");
                 refreshNeoPixels();
+                printf("NeoPixels Enabled.\n");
             }
-            else if (startswith(cmd, "#SMNEOOFF"))
+            CMD("#SMNEOOFF")
             {
                 neopixelEnabled = false;
                 preferences.putBool("neoenable", false);
-                printf("NeoPixels disabled.\n");
-                strip.clear();
-                strip.show();
+                refreshNeoPixels();
+                printf("NeoPixels Disabled.\n");
+            }
+            CMD("#SMNEOCOUNT")
+            {
+                uint32_t v;
+                if (parseUIntInRange(cmd, v, 0, 300, "Usage: #SMNEOCOUNT <count>")) {
+                    neopixelCount = v;
+                    preferences.putInt("neocount", neopixelCount);
+                    initNeoPixels(neopixelCount);
+                    refreshNeoPixels();
+                    printf("NeoPixel count set to %u\n", v);
+                }
+            }
+            CMD("#SMNEOCOLOR")
+            {
+                long r, g, b;
+                if (!parseLongArg(cmd, r)) { printf("Usage: #SMNEOCOLOR <R> <G> <B>\n"); }
+                else if (!parseLongArg(cmd, g)) { printf("Usage: #SMNEOCOLOR <R> <G> <B>\n"); }
+                else if (!parseLongArg(cmd, b)) { printf("Usage: #SMNEOCOLOR <R> <G> <B>\n"); }
+                else {
+                    // Clamp to 0..255
+                    if (r < 0) r = 0; if (r > 255) r = 255;
+                    if (g < 0) g = 0; if (g > 255) g = 255;
+                    if (b < 0) b = 0; if (b > 255) b = 255;
+
+                    neopixelR = r;
+                    neopixelG = g;
+                    neopixelB = b;
+
+                    preferences.putInt("neor", neopixelR);
+                    preferences.putInt("neog", neopixelG);
+                    preferences.putInt("neob", neopixelB);
+
+                    refreshNeoPixels();
+                    printf("NeoPixel color set to R=%ld G=%ld B=%ld\n", r, g, b);
+                }
             }
 
-            else
-            {
-                printf("Unknown: %s\n", sBuffer);
-            }
+else
+{
+    printf("Unknown: %s\n", sBuffer);
+}
+
             sPos = 0;
         }
         else if (sPos < SizeOfArray(sBuffer)-1)
