@@ -752,6 +752,59 @@ void sendBodyMarcCommand(const char* cmd)
     BODY_MAESTRO_SERIAL.print(cmd); BODY_MAESTRO_SERIAL.print("\r");
 }
 
+// ------- SM console help -------
+static void printSMHelp()
+{
+    printf("\nPenumbra / Maestro Console Commands\n");
+    printf("-----------------------------------\n");
+    printf("#SMHELP                    : Show this help.\n");
+    printf("#SMZERO                    : Clear ALL preferences (factory reset) and reboot.\n");
+    printf("#SMRESTART                 : Reboot the controller.\n");
+    printf("#SMLIST                    : List all button actions.\n");
+    printf("#SMDEL <TriggerName>       : Reset a trigger to its default action.\n");
+    printf("#SMPLAY <TriggerName>      : Execute a trigger now.\n");
+    printf("#SMSET <Trigger> <Action>  : Bind an action to a trigger.\n");
+    printf("    Action formats:\n");
+    printf("      DM<seq>              : Dome Maestro subroutine <seq>\n");
+    printf("      BM<seq>              : Body Maestro subroutine <seq>\n");
+    printf("      DM<seq>;S<num>       : Run <seq>, then play sound track <num>\n");
+    printf("      DM<seq>;S<letter>    : Run <seq>, then sound command $<LETTER> (e.g. $R start random)\n");
+    printf("      S<num>               : Play sound track <num> only (flat index)\n");
+    printf("      S<letter>            : Sound command $<LETTER> only (e.g. Sf volume max)\n");
+    printf("\n");
+    printf("#SMSOUND0                  : Sound Disabled\n");
+    printf("#SMSOUND1                  : Sound = MP3 Trigger (38400 baud)\n");
+    printf("#SMSOUND2                  : Sound = DFPlayer Mini (9600 baud)\n");
+    printf("#SMSOUND3                  : Sound = DY-SV5W / HCR (9600 baud)\n");
+    printf("#SMVOLUME <0..1000>        : Sound volume (0=muted .. 1000=max)\n");
+    printf("#SMSTARTUP <track|-1>      : Startup sound (track number) or -1 to disable\n");
+    printf("#SMRAND0                   : Disable random sounds\n");
+    printf("#SMRAND1                   : Enable random sounds (uses current random timing)\n");
+    printf("#SMRANDMIN <ms>            : Random minimum delay (milliseconds)\n");
+    printf("#SMRANDMAX <ms>            : Random maximum delay (milliseconds)\n");
+    printf("\n");
+    printf("#SMNORMALSPEED <0..127>    : Drive normal speed\n");
+    printf("#SMMAXSPEED <0..127>       : Drive max speed (over-throttle)\n");
+    printf("#SMTURNSPEED <0..127>      : Turn speed\n");
+    printf("#SMDOMESPEED <0..127>      : Dome joystick speed\n");
+    printf("#SMRAMPING <0..10>         : Accel/decel ramping level\n");
+    printf("#SMFOOTDB <0..127>         : Foot stick deadband\n");
+    printf("#SMDOMEDB <0..127>         : Dome stick deadband\n");
+    printf("#SMDRIVEDB <0..127>        : Drive controller deadband\n");
+    printf("#SMINVERT <0|1>            : Invert turn direction\n");
+    printf("#SMAUTOSPEED <50..100>     : Auto dome speed (percent)\n");
+    printf("#SMAUTOTIME <2000..8000>   : Auto dome turn time (ms)\n");
+    printf("#SMMARCBAUD <baud>         : Maestro serial baud (needs reboot)\n");
+    printf("#SMMOTORBAUD <baud>        : Motor controller baud (needs reboot)\n");
+    printf("\n");
+    printf("Tips:\n");
+    printf(" - Use #SMLIST to see current trigger bindings.\n");
+    printf(" - Example bindings:  #SMSET FTbtnUP_MD \"DM58;S3\"   (dome seq 58 + track 3)\n");
+    printf("                      #SMSET btnRight_MD \"S f\"      (sound cmd $F: volume max)\n");
+    printf("                      #SMSET FTbtnUP_CROSS_MD \"S R\" (start random)\n");
+    printf("\n");
+}
+
 ////////////////////////////////
 // This function is called when settings have been changed and needs a reboot
 void reboot()
@@ -911,19 +964,40 @@ void loop()
 
             else if (startswith(cmd, "#SMCONFIG"))
             {
-                printf("Drive Speed Normal:  %3d (#SMNORMALSPEED) [0..127]\n", drivespeed1);
-                printf("Drive Speed Normal:  %3d (#SMNORMALSPEED) [0..127]\n", drivespeed1);
-                printf("Drive Speed Max:     %3d (#SMMAXSPEED)    [0..127]\n", drivespeed2);
-                printf("Turn Speed:          %3d (#SMTURNSPEED)   [0..127]\n", turnspeed);
-                printf("Dome Speed:          %3d (#SMDOMESPEED)   [0..127]\n", domespeed);
-                printf("Ramping:             %3d (#SMRAMPING)     [0..10]\n", ramping);
-                printf("Foot Stick Deadband: %3d (#SMFOOTDB)      [0..127]\n", joystickFootDeadZoneRange);
-                printf("Dome Stick Deadband: %3d (#SMDOMEDB)      [0..127]\n", joystickDomeDeadZoneRange);
-                printf("Drive Deadband:      %3d (#SMDRIVEDB)     [0..127]\n", driveDeadBandRange);
-                printf("Invert Turn:         %3d (#SMINVERT)      [0..1]\n", invertTurnDirection);
-                printf("Dome Auto Speed:     %3d (#SMAUTOSPEED)   [50..100]\n", domeAutoSpeed);
-                printf("Dome Auto Time:     %4d (#SMAUTOTIME)    [2000..8000]\n", time360DomeTurn);
-                printf("Maestro Baud:   %6d (#SMMARCBAUD)\n", maestroBaudRate);
+                // Current sound settings
+                MarcSound::Module smod = (MarcSound::Module)preferences.getInt(PREFERENCE_MARCSOUND, MARC_SOUND_PLAYER);
+                int vol   = preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, MARC_SOUND_VOLUME);
+                int start = preferences.getInt(PREFERENCE_MARCSOUND_STARTUP, MARC_SOUND_STARTUP);
+                bool rnd  = preferences.getBool(PREFERENCE_MARCSOUND_RANDOM, MARC_SOUND_RANDOM);
+                int rmin  = preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MIN, MARC_SOUND_RANDOM_MIN);
+                int rmax  = preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MAX, MARC_SOUND_RANDOM_MAX);
+
+                printf("Configuration\n");
+                printf("-----------------------------------\n");
+
+                // Sound section
+                printf("Sound Module:        %s   (#SMSOUND0/1/2/3)\n", MarcSound::moduleName(smod));
+                printf("Sound Volume:        %4d (#SMVOLUME)         [0..1000]\n", vol);
+                printf("Startup Sound:       %4d (#SMSTARTUP)        [-1 disable | track]\n", start);
+                printf("Random Enabled:      %4d (#SMRAND0/#SMRAND1) [0/1]\n", rnd ? 1 : 0);
+                printf("Random Min Delay:    %4d (#SMRANDMIN)        [ms]\n", rmin);
+                printf("Random Max Delay:    %4d (#SMRANDMAX)        [ms]\n", rmax);
+
+                // Motion / control (fixed duplicate and kept names)
+                printf("Drive Speed Normal:  %3d (#SMNORMALSPEED)    [0..127]\n", drivespeed1);
+                printf("Drive Speed Max:     %3d (#SMMAXSPEED)       [0..127]\n", drivespeed2);
+                printf("Turn Speed:          %3d (#SMTURNSPEED)      [0..127]\n", turnspeed);
+                printf("Dome Speed:          %3d (#SMDOMESPEED)      [0..127]\n", domespeed);
+                printf("Ramping:             %3d (#SMRAMPING)        [0..10]\n", ramping);
+                printf("Foot Stick Deadband: %3d (#SMFOOTDB)         [0..127]\n", joystickFootDeadZoneRange);
+                printf("Dome Stick Deadband: %3d (#SMDOMEDB)         [0..127]\n", joystickDomeDeadZoneRange);
+                printf("Drive Deadband:      %3d (#SMDRIVEDB)        [0..127]\n", driveDeadBandRange);
+                printf("Invert Turn:         %3d (#SMINVERT)         [0..1]\n", invertTurnDirection);
+                printf("Dome Auto Speed:     %3d (#SMAUTOSPEED)      [50..100]\n", domeAutoSpeed);
+                printf("Dome Auto Time:     %4d (#SMAUTOTIME)       [2000..8000 ms]\n", time360DomeTurn);
+
+                // Serial rates
+                printf("Maestro Baud:     %6d (#SMMARCBAUD)\n", maestroBaudRate);
                 printf("Motor Baud:       %6d (#SMMOTORBAUD)\n", motorControllerBaudRate);
             }
             else if (startswith(cmd, "#SMSTARTUP"))
@@ -1222,6 +1296,10 @@ void loop()
                         printf("Trigger Not Found: %s\n", key.c_str());
                     }
                 }
+            }
+            else if (startswith(cmd, "#SMHELP"))
+            {
+                printSMHelp();
             }
             else
             {
