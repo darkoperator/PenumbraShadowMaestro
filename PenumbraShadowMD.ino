@@ -1,12 +1,15 @@
 // =======================================================================================
 //                      Penumbra Shadow Maestro: Derived from SHADOW_MD
 // =======================================================================================
-//        SHADOW_MD:  Small Handheld Arduino Droid Operating Wand + MarcDuino
+//        SHADOW_MD:  Small Handheld Arduino Droid Operating Wand + Maestro Servo Control
 // =======================================================================================
-//                          Last Revised Date: 01/08/2023
-//                             Revised By: skelmir
+//                        Last Revised Date: 09/11/2025
+//                            Revised By: Carlos Perez
+//                     Contact: carlos_perez@darkoperator.com
+//                        Previously Revised Date: 01/08/2023
+//                            Revised By: skelmir
 //                        Previously Revised Date: 08/23/2015
-//                             Revised By: vint43
+//                            Revised By: vint43
 //                Inspired by the PADAWAN / KnightShade SHADOW effort
 // =======================================================================================
 //
@@ -27,6 +30,7 @@
 //
 // =======================================================================================
 //   Note: You will need an ESP32 with a USB Host MAX3421 chip.
+// =======================================================================================
 //
 //   Required Libraries:
 ///
@@ -142,18 +146,18 @@ int time360DomeTurn = DEFAULT_AUTO_DOME_TURN_TIME;
 
 // #define SHADOW_DEBUG(...) printf(__VA_ARGS__);
 #define SHADOW_VERBOSE(...) printf(__VA_ARGS__);
-#include "MarcduinoSound.h" 
-MarcSound sMarcSound; 
+#include "ShadowSound.h"
+SDSound sShadowSound;
 #ifdef USE_PREFERENCES
 #include <Preferences.h>
 #define PREFERENCE_PS3_FOOT_MAC             "ps3footmac"
 #define PREFERENCE_PS3_DOME_MAC             "ps3domemac"
-#define PREFERENCE_MARCSOUND                "msound"
-#define PREFERENCE_MARCSOUND_VOLUME         "mvolume"
-#define PREFERENCE_MARCSOUND_STARTUP        "msoundstart"
-#define PREFERENCE_MARCSOUND_RANDOM         "mrandom"
-#define PREFERENCE_MARCSOUND_RANDOM_MIN     "mrandommin"
-#define PREFERENCE_MARCSOUND_RANDOM_MAX     "mrandommax"
+#define PREFERENCE_SHADOWSOUND                "msound"
+#define PREFERENCE_SHADOWSOUND_VOLUME         "mvolume"
+#define PREFERENCE_SHADOWSOUND_STARTUP        "msoundstart"
+#define PREFERENCE_SHADOWSOUND_RANDOM         "mrandom"
+#define PREFERENCE_SHADOWSOUND_RANDOM_MIN     "mrandommin"
+#define PREFERENCE_SHADOWSOUND_RANDOM_MAX     "mrandommax"
 #define PREFERENCE_SPEED_NORMAL             "smspeednorm"
 #define PREFERENCE_SPEED_OVER_THROTTLE      "smspeedmax"
 #define PREFERENCE_TURN_SPEED               "smspeedturn"
@@ -181,10 +185,10 @@ void sendBodyMaestroSequence(uint8_t subIndex);
 void sendMarcCommand(const char* cmd);
 void sendBodyMarcCommand(const char* cmd);
 
-class MarcduinoButtonAction
+class ShadowButtonAction
 {
 public:
-    MarcduinoButtonAction(const char* name, const char* default_action) :
+    ShadowButtonAction(const char* name, const char* default_action) :
         fNext(NULL), fName(name), fDefaultAction(default_action)
     {
         if (*head() == NULL) *head() = this;
@@ -192,9 +196,9 @@ public:
         *tail() = this;
     }
 
-    static MarcduinoButtonAction* findAction(String name)
+    static ShadowButtonAction* findAction(String name)
     {
-        for (MarcduinoButtonAction* btn = *head(); btn != NULL; btn = btn->fNext)
+        for (ShadowButtonAction* btn = *head(); btn != NULL; btn = btn->fNext)
             if (name.equalsIgnoreCase(btn->name())) return btn;
         return nullptr;
     }
@@ -202,7 +206,7 @@ public:
 
     static void listActions()
     {
-        for (MarcduinoButtonAction* btn = *head(); btn != NULL; btn = btn->fNext)
+        for (ShadowButtonAction* btn = *head(); btn != NULL; btn = btn->fNext)
             printf("%s: %s\n", btn->name().c_str(), btn->action().c_str());
     }
 
@@ -246,15 +250,15 @@ public:
     }
 
 private:
-    MarcduinoButtonAction* fNext;
+    ShadowButtonAction* fNext;
     const char* fName;
     const char* fDefaultAction;
 
-    static MarcduinoButtonAction** head() { static MarcduinoButtonAction* sHead; return &sHead; }
-    static MarcduinoButtonAction** tail() { static MarcduinoButtonAction* sTail; return &sTail; }
+    static ShadowButtonAction** head() { static ShadowButtonAction* sHead; return &sHead; }
+    static ShadowButtonAction** tail() { static ShadowButtonAction* sTail; return &sTail; }
 };
 
-#define MARCDUINO_ACTION(var,act) MarcduinoButtonAction var(#var,act);
+#define SHADOW_ACTION(var,act) ShadowButtonAction var(#var,act);
 
 
 
@@ -262,51 +266,51 @@ private:
 // CONFIGURE: The FOOT Navigation Controller Buttons
 //----------------------------------------------------
 
-MARCDUINO_ACTION(btnUP_MD, "BM:1")
-MARCDUINO_ACTION(btnLeft_MD, "BM:2")
-MARCDUINO_ACTION(btnRight_MD, "BM:3")
-MARCDUINO_ACTION(btnDown_MD, "BM:4")
-MARCDUINO_ACTION(btnUP_L1_MD, "BM:5")
-MARCDUINO_ACTION(btnLeft_L1_MD, "BM:6")
-MARCDUINO_ACTION(btnRight_L1_MD, "BM:7")
-MARCDUINO_ACTION(btnDown_L1_MD, "BM:8")
-MARCDUINO_ACTION(btnUP_CROSS_MD, "BM:9")
-MARCDUINO_ACTION(btnLeft_CROSS_MD, "BM:10")
-MARCDUINO_ACTION(btnRight_CROSS_MD, "BM:11")
-MARCDUINO_ACTION(btnDown_CROSS_MD, "BM:12")
-MARCDUINO_ACTION(btnUP_CIRCLE_MD, "BM:13")
-MARCDUINO_ACTION(btnLeft_CIRCLE_MD, "BM:14")
-MARCDUINO_ACTION(btnRight_CIRCLE_MD, "BM:15")
-MARCDUINO_ACTION(btnDown_CIRCLE_MD, "BM:16")
-MARCDUINO_ACTION(btnUP_PS_MD, "BM:17")
-MARCDUINO_ACTION(btnLeft_PS_MD, "BM:18")
-MARCDUINO_ACTION(btnRight_PS_MD, "BM:19")
-MARCDUINO_ACTION(btnDown_PS_MD, "BM:20")
+SHADOW_ACTION(btnUP_MD, "BM:1")
+SHADOW_ACTION(btnLeft_MD, "BM:2")
+SHADOW_ACTION(btnRight_MD, "BM:3")
+SHADOW_ACTION(btnDown_MD, "BM:4")
+SHADOW_ACTION(btnUP_L1_MD, "BM:5")
+SHADOW_ACTION(btnLeft_L1_MD, "BM:6")
+SHADOW_ACTION(btnRight_L1_MD, "BM:7")
+SHADOW_ACTION(btnDown_L1_MD, "BM:8")
+SHADOW_ACTION(btnUP_CROSS_MD, "BM:9")
+SHADOW_ACTION(btnLeft_CROSS_MD, "BM:10")
+SHADOW_ACTION(btnRight_CROSS_MD, "BM:11")
+SHADOW_ACTION(btnDown_CROSS_MD, "BM:12")
+SHADOW_ACTION(btnUP_CIRCLE_MD, "BM:13")
+SHADOW_ACTION(btnLeft_CIRCLE_MD, "BM:14")
+SHADOW_ACTION(btnRight_CIRCLE_MD, "BM:15")
+SHADOW_ACTION(btnDown_CIRCLE_MD, "BM:16")
+SHADOW_ACTION(btnUP_PS_MD, "BM:17")
+SHADOW_ACTION(btnLeft_PS_MD, "BM:18")
+SHADOW_ACTION(btnRight_PS_MD, "BM:19")
+SHADOW_ACTION(btnDown_PS_MD, "BM:20")
 
 
 //----------------------------------------------------
 // CONFIGURE: The DOME Navigation Controller Buttons
 //----------------------------------------------------
-MARCDUINO_ACTION(FTbtnUP_MD, "DM:1")             // Arrow Up
-MARCDUINO_ACTION(FTbtnLeft_MD, "DM:2")           // Arrow Left
-MARCDUINO_ACTION(FTbtnRight_MD, "DM:3")          // Arrow Right
-MARCDUINO_ACTION(FTbtnDown_MD, "DM:4")           // Arrow Down
-MARCDUINO_ACTION(FTbtnUP_L1_MD, "DM:5")          // Arrow UP + L1
-MARCDUINO_ACTION(FTbtnLeft_L1_MD, "DM:6")        // Arrow Left + L1
-MARCDUINO_ACTION(FTbtnRight_L1_MD, "DM:7")       // Arrow Right + L1
-MARCDUINO_ACTION(FTbtnDown_L1_MD, "DM:8")        // Arrow Down + L1
-MARCDUINO_ACTION(FTbtnUP_CROSS_MD, "DM:9")       // Arrow UP + CROSS
-MARCDUINO_ACTION(FTbtnLeft_CROSS_MD, "DM:10")    // Arrow Left + CROSS
-MARCDUINO_ACTION(FTbtnRight_CROSS_MD, "DM:11")   // Arrow Right + CROSS
-MARCDUINO_ACTION(FTbtnDown_CROSS_MD, "DM:12")    // Arrow Down + CROSS
-MARCDUINO_ACTION(FTbtnUP_CIRCLE_MD, "DM:13")     // Arrow Up + CIRCLE
-MARCDUINO_ACTION(FTbtnLeft_CIRCLE_MD, "DM:14")   // Arrow Left + CIRCLE
-MARCDUINO_ACTION(FTbtnRight_CIRCLE_MD, "DM:15")  // Arrow Right + CIRCLE
-MARCDUINO_ACTION(FTbtnDown_CIRCLE_MD, "DM:16")   // Arrow Down + CIRCLE
-MARCDUINO_ACTION(FTbtnUP_PS_MD, "DM:17")         // Arrow UP + PS
-MARCDUINO_ACTION(FTbtnLeft_PS_MD, "DM:18")       // Arrow Left + PS
-MARCDUINO_ACTION(FTbtnRight_PS_MD, "DM:19")      // Arrow Right + PS
-MARCDUINO_ACTION(FTbtnDown_PS_MD, "DM:20")       // Arrow Down + PS
+SHADOW_ACTION(FTbtnUP_MD, "DM:1")             // Arrow Up
+SHADOW_ACTION(FTbtnLeft_MD, "DM:2")           // Arrow Left
+SHADOW_ACTION(FTbtnRight_MD, "DM:3")          // Arrow Right
+SHADOW_ACTION(FTbtnDown_MD, "DM:4")           // Arrow Down
+SHADOW_ACTION(FTbtnUP_L1_MD, "DM:5")          // Arrow UP + L1
+SHADOW_ACTION(FTbtnLeft_L1_MD, "DM:6")        // Arrow Left + L1
+SHADOW_ACTION(FTbtnRight_L1_MD, "DM:7")       // Arrow Right + L1
+SHADOW_ACTION(FTbtnDown_L1_MD, "DM:8")        // Arrow Down + L1
+SHADOW_ACTION(FTbtnUP_CROSS_MD, "DM:9")       // Arrow UP + CROSS
+SHADOW_ACTION(FTbtnLeft_CROSS_MD, "DM:10")    // Arrow Left + CROSS
+SHADOW_ACTION(FTbtnRight_CROSS_MD, "DM:11")   // Arrow Right + CROSS
+SHADOW_ACTION(FTbtnDown_CROSS_MD, "DM:12")    // Arrow Down + CROSS
+SHADOW_ACTION(FTbtnUP_CIRCLE_MD, "DM:13")     // Arrow Up + CIRCLE
+SHADOW_ACTION(FTbtnLeft_CIRCLE_MD, "DM:14")   // Arrow Left + CIRCLE
+SHADOW_ACTION(FTbtnRight_CIRCLE_MD, "DM:15")  // Arrow Right + CIRCLE
+SHADOW_ACTION(FTbtnDown_CIRCLE_MD, "DM:16")   // Arrow Down + CIRCLE
+SHADOW_ACTION(FTbtnUP_PS_MD, "DM:17")         // Arrow UP + PS
+SHADOW_ACTION(FTbtnLeft_PS_MD, "DM:18")       // Arrow Left + PS
+SHADOW_ACTION(FTbtnRight_PS_MD, "DM:19")      // Arrow Right + PS
+SHADOW_ACTION(FTbtnDown_PS_MD, "DM:20")       // Arrow Down + PS
 
 
 // ---------------------------------------------------------------------------------------
@@ -323,6 +327,9 @@ int maestroBaudRate = DEFAULT_MAESTRO_BAUD;
 #define FOOT_MOTOR_ADDR      128      // Serial Address for Foot Motor
 #define DOME_MOTOR_ADDR      129      // Serial Address for Dome Motor
 
+#ifdef DEBUG_PRINTLN
+#undef DEBUG_PRINTLN
+#endif
 
 // ---------------------------------------------------------------------------------------
 //                          Libraries
@@ -451,20 +458,20 @@ bool handleSMSOUND(const char* bracketArg)
 {
     if (!bracketArg) return false;
     int val = atoi(bracketArg);               // 0..3 from your UI
-    MarcSound::Module mod = MarcSound::fromChoice(val);
-    uint32_t baud = MarcSound::baudFor(mod);
+    SDSound::Module mod = SDSound::fromChoice(val);
+    uint32_t baud = SDSound::baudFor(mod);
 
     // Persist choice
-    preferences.putInt(PREFERENCE_MARCSOUND, (int)mod);
+    preferences.putInt(PREFERENCE_SHADOWSOUND, (int)mod);
 
     // Re-init immediately (optional; or just apply next boot)
-    sMarcSound.end();
+    sShadowSound.end();
     SOUND_SERIAL.end();
     if (baud) SOUND_SERIAL_INIT(baud);        // uses your pin-map.h macros
-    if (baud) sMarcSound.begin(mod, SOUND_SERIAL, /*startupSound*/ -1);
+    if (baud) sShadowSound.begin(mod, SOUND_SERIAL, /*startupSound*/ -1);
     
 
-    DEBUG_PRINTF("Sound module: %s (%d baud)\n", MarcSound::moduleName(mod), (int)baud);
+    DEBUG_PRINTF("Sound module: %s (%d baud)\n", SDSound::moduleName(mod), (int)baud);
     return true;
 }
 
@@ -590,14 +597,14 @@ static void _playTrackNumber(long n)
 {
     if (n < 1) n = 1;
     if (n > 225) n = 225;
-    sMarcSound.playSound(0, (uint8_t)n);
+    sShadowSound.playSound(0, (uint8_t)n);
 }
 
 // Send a single-letter sound command as "$<LETTER>"
 static void _soundLetterCmd(char letter)
 {
     char buf[3] = {'$', (char)toupper((unsigned char)letter), 0};
-    sMarcSound.handleCommand(buf);
+    sShadowSound.handleCommand(buf);
 }
 
 // Parse "S..." after a semicolon; return true if something was executed.
@@ -708,15 +715,16 @@ bool handleMaestroAction(const char* action)
 
 #if defined(USE_HCR_VOCALIZER) || defined(USE_MP3_TRIGGER) || defined(USE_DFMINI_PLAYER)
 //#define SOUND_DEBUG(...) printf(__VA_ARGS__);
-#define MARC_SOUND_VOLUME               500     // 0 - 1000
-#define MARC_SOUND_RANDOM               true    // Play random sounds
-#define MARC_SOUND_RANDOM_MIN           1000    // Min wait until random sound
-#define MARC_SOUND_RANDOM_MAX           10000   // Max wait until random sound
-#define MARC_SOUND_STARTUP              255     // Startup sound
-#define MARC_SOUND_PLAYER               MarcSound::kMP3Trigger_UART  // Default sound module
-#include "MarcduinoSound.h"
+#define SHADOW_SOUND_VOLUME               500     // 0 - 1000
+#define SHADOW_SOUND_RANDOM               true    // Play random sounds
+#define SHADOW_SOUND_RANDOM_MIN           1000    // Min wait until random sound
+#define SHADOW_SOUND_RANDOM_MAX           10000   // Max wait until random sound
+#define SHADOW_SOUND_STARTUP              255     // Startup sound
+#define SHADOW_SOUND_PLAYER               SDSound::kMP3Trigger  // Default sound module
 
-#define MARC_SOUND
+
+
+#define SHADOW_SOUND
 #endif
 
 // =======================================================================================
@@ -800,37 +808,42 @@ void setup()
         DEBUG_PRINTLN("OSC did not start");
         while (1); //halt
     }
-#if defined(MARC_SOUND_PLAYER)
-    MarcSound::Module soundPlayer =
-        (MarcSound::Module)preferences.getInt(PREFERENCE_MARCSOUND, MARC_SOUND_PLAYER);
+#if defined(SHADOW_SOUND_PLAYER)
+    SDSound::Module soundPlayer =
+        (SDSound::Module)preferences.getInt(PREFERENCE_SHADOWSOUND, SHADOW_SOUND_PLAYER);
     int soundStartup =
-        preferences.getInt(PREFERENCE_MARCSOUND_STARTUP, MARC_SOUND_STARTUP);
+        preferences.getInt(PREFERENCE_SHADOWSOUND_STARTUP, SHADOW_SOUND_STARTUP);
 
-    uint32_t soundBaud = (soundPlayer == MarcSound::kMP3Trigger_UART) ? 38400 : 9600;
+    uint32_t soundBaud = (soundPlayer == SDSound::kMP3Trigger) ? 38400 : 9600;
+
     SOUND_SERIAL.end();
     if (soundBaud) SOUND_SERIAL_INIT(soundBaud);
 
-    bool ok = soundBaud ? sMarcSound.begin(soundPlayer, SOUND_SERIAL, soundStartup) : false;
+    bool ok = soundBaud ? sShadowSound.begin(soundPlayer, SOUND_SERIAL, soundStartup) : false;
     if (!ok) {
         DEBUG_PRINTLN("FAILED TO INITALIZE SOUND MODULE");
     }
 
     // --- Apply prefs (volume, random intervals) ---
-    int volPref = preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, 700);
+    int volPref = preferences.getInt(PREFERENCE_SHADOWSOUND_VOLUME, 700);
     if (volPref < 50) volPref = 700;
-    sMarcSound.setVolume(volPref / 1000.0f);
-    sMarcSound.setRandomMin(preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MIN, MARC_SOUND_RANDOM_MIN));
-    sMarcSound.setRandomMax(preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MAX, MARC_SOUND_RANDOM_MAX));
+    // Restore the flat random track range (defaults to full 1..255)
+    int rtmin = preferences.getInt("sm_rtmin", 1);
+    int rtmax = preferences.getInt("sm_rtmax", 255);
+    sShadowSound.setRandomTracks((uint16_t)rtmin, (uint16_t)rtmax);
+    sShadowSound.setVolume(volPref / 1000.0f);
+    sShadowSound.setRandomMin(preferences.getInt(PREFERENCE_SHADOWSOUND_RANDOM_MIN, SHADOW_SOUND_RANDOM_MIN));
+    sShadowSound.setRandomMax(preferences.getInt(PREFERENCE_SHADOWSOUND_RANDOM_MAX, SHADOW_SOUND_RANDOM_MAX));
 
     // --- Play startup sound ---
     if (soundStartup > 0) {
         delay(150); // let the player settle after init + volume
-        sMarcSound.playSound(0, (uint8_t)soundStartup);
+        sShadowSound.playSound(0, (uint8_t)soundStartup);
     }
 
     // --- Start random sounds if enabled ---
-    if (preferences.getBool(PREFERENCE_MARCSOUND_RANDOM, MARC_SOUND_RANDOM))
-        sMarcSound.startRandomInSeconds(13);
+    if (preferences.getBool(PREFERENCE_SHADOWSOUND_RANDOM, SHADOW_SOUND_RANDOM))
+        sShadowSound.startRandomInSeconds(13);
 #endif
 
 
@@ -841,11 +854,11 @@ void sendMarcCommand(const char* cmd)
     SHADOW_VERBOSE("Sending MARC: \"%s\"\n", cmd)
     MAESTRO_SERIAL.print(cmd); MAESTRO_SERIAL.print("\r");
 
-#if defined(MARC_SOUND_PLAYER)
+#if defined(SHADOW_SOUND_PLAYER)
     SHADOW_VERBOSE("Sound CMD: \"%s\"\n", cmd);
     // Pass-through to sound driver’s $-style parser.
     // (It safely ignores non-$ strings.)
-    sMarcSound.handleCommand(cmd);
+    sShadowSound.handleCommand(cmd);
 #endif
 }
 
@@ -933,8 +946,8 @@ void loop()
     marcDuinoDome();
     marcDuinoFoot();
     toggleSettings();    
-#if defined(MARC_SOUND_PLAYER)
-    sMarcSound.idle();
+#if defined(SHADOW_SOUND_PLAYER)
+    sShadowSound.idle();
 #endif
 
     // If dome automation is enabled - Call function
@@ -965,12 +978,12 @@ void loop()
             {
                 printf("Button Actions\n");
                 printf("-----------------------------------\n");
-                MarcduinoButtonAction::listActions();
+                ShadowButtonAction::listActions();
             }
             CMD("#SMDEL")
             {
                 String key(cmd); key.trim();
-                MarcduinoButtonAction* btn = MarcduinoButtonAction::findAction(key);
+                ShadowButtonAction* btn = ShadowButtonAction::findAction(key);
                 if (btn) {
                     btn->reset();
                     printf("Trigger: %s reset to default %s\n", btn->name().c_str(), btn->action().c_str());
@@ -982,8 +995,8 @@ void loop()
             {
                 uint32_t val;
                 if (parseUIntInRange(cmd, val, 0, 1000, "Usage: #SMVOLUME <0..1000>")) {
-                    preferences.putInt(PREFERENCE_MARCSOUND_VOLUME, (int)val);
-                    sMarcSound.setVolume(val / 1000.0f);              // linear mapping
+                    preferences.putInt(PREFERENCE_SHADOWSOUND_VOLUME, (int)val);
+                    sShadowSound.setVolume(val / 1000.0f);              // linear mapping
                     printf("Sound Volume: %u (%.0f%%)\n", val, val / 10.0f);
                 }
             }
@@ -993,52 +1006,54 @@ void loop()
                 if (!parseLongArg(cmd, choice)) {
                     printf("Usage: #SMSOUND0 | #SMSOUND1 | #SMSOUND2 | #SMSOUND3\n");
                 } else {
-                    MarcSound::Module mod  = MarcSound::fromChoice((int)choice);
-                    uint32_t          baud = MarcSound::baudFor(mod);
+                    SDSound::Module mod  = SDSound::fromChoice((int)choice);
+                    uint32_t          baud = SDSound::baudFor(mod);
 
-                    preferences.putInt(PREFERENCE_MARCSOUND, (int)mod);
+                    preferences.putInt(PREFERENCE_SHADOWSOUND, (int)mod);
 
-                    sMarcSound.end();
+                    sShadowSound.end();
                     SOUND_SERIAL.end();
                     if (baud) {
                         SOUND_SERIAL_INIT(baud);
-                        int startup = preferences.getInt(PREFERENCE_MARCSOUND_STARTUP, MARC_SOUND_STARTUP);
-                        if (!sMarcSound.begin(mod, SOUND_SERIAL, startup)) {
+                        int startup = preferences.getInt(PREFERENCE_SHADOWSOUND_STARTUP, SHADOW_SOUND_STARTUP);
+                        if (!sShadowSound.begin(mod, SOUND_SERIAL, startup)) {
                             printf("FAILED TO INITIALIZE SOUND MODULE: %s (baud=%lu)\n",
-                                MarcSound::moduleName(mod), (unsigned long)baud);
+                                SDSound::moduleName(mod), (unsigned long)baud);
                         } else {
-                            int volPref = preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, 700);
+                            int volPref = preferences.getInt(PREFERENCE_SHADOWSOUND_VOLUME, 700);
                             if (volPref < 50) volPref = 700;
-                            sMarcSound.setVolume(volPref / 1000.0f);
-                            sMarcSound.setRandomMin(preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MIN, MARC_SOUND_RANDOM_MIN));
-                            sMarcSound.setRandomMax(preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MAX, MARC_SOUND_RANDOM_MAX));
-                            if (preferences.getBool(PREFERENCE_MARCSOUND_RANDOM, MARC_SOUND_RANDOM))
-                                sMarcSound.startRandomInSeconds(13);
+                            sShadowSound.setVolume(volPref / 1000.0f);
+                            sShadowSound.setRandomMin(preferences.getInt(PREFERENCE_SHADOWSOUND_RANDOM_MIN, SHADOW_SOUND_RANDOM_MIN));
+                            sShadowSound.setRandomMax(preferences.getInt(PREFERENCE_SHADOWSOUND_RANDOM_MAX, SHADOW_SOUND_RANDOM_MAX));
+                            if (preferences.getBool(PREFERENCE_SHADOWSOUND_RANDOM, SHADOW_SOUND_RANDOM))
+                                sShadowSound.startRandomInSeconds(13);
                         }
                     } else {
                         printf("Sound Disabled.\n");
                     }
                     printf("Sound module set to: %s (%lu baud)\n",
-                        MarcSound::moduleName(mod), (unsigned long)baud);
+                        SDSound::moduleName(mod), (unsigned long)baud);
                 }
             }
             CMD("#SMCONFIG")
             {
-                MarcSound::Module smod = (MarcSound::Module)preferences.getInt(PREFERENCE_MARCSOUND, MARC_SOUND_PLAYER);
-                int vol   = preferences.getInt(PREFERENCE_MARCSOUND_VOLUME, MARC_SOUND_VOLUME);
-                int start = preferences.getInt(PREFERENCE_MARCSOUND_STARTUP, MARC_SOUND_STARTUP);
-                bool rnd  = preferences.getBool(PREFERENCE_MARCSOUND_RANDOM, MARC_SOUND_RANDOM);
-                int rmin  = preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MIN, MARC_SOUND_RANDOM_MIN);
-                int rmax  = preferences.getInt(PREFERENCE_MARCSOUND_RANDOM_MAX, MARC_SOUND_RANDOM_MAX);
-
+                SDSound::Module smod = (SDSound::Module)preferences.getInt(PREFERENCE_SHADOWSOUND, SHADOW_SOUND_PLAYER);
+                int vol   = preferences.getInt(PREFERENCE_SHADOWSOUND_VOLUME, SHADOW_SOUND_VOLUME);
+                int start = preferences.getInt(PREFERENCE_SHADOWSOUND_STARTUP, SHADOW_SOUND_STARTUP);
+                bool rnd  = preferences.getBool(PREFERENCE_SHADOWSOUND_RANDOM, SHADOW_SOUND_RANDOM);
+                int rmin  = preferences.getInt(PREFERENCE_SHADOWSOUND_RANDOM_MIN, SHADOW_SOUND_RANDOM_MIN);
+                int rmax  = preferences.getInt(PREFERENCE_SHADOWSOUND_RANDOM_MAX, SHADOW_SOUND_RANDOM_MAX);
+                uint16_t rtlo, rthi;
+                sShadowSound.getRandomTracks(rtlo, rthi);
                 printf("Configuration\n");
                 printf("-----------------------------------\n");
-                printf("Sound Module:        %s   (#SMSOUND0/1/2/3)\n", MarcSound::moduleName(smod));
+                printf("Sound Module:        %s   (#SMSOUND0/1/2/3)\n", SDSound::moduleName(smod));
                 printf("Sound Volume:        %4d (#SMVOLUME)         [0..1000]\n", vol);
                 printf("Startup Sound:       %4d (#SMSTARTUP)        [-1 disable | track]\n", start);
                 printf("Random Enabled:      %4d (#SMRAND0/#SMRAND1) [0/1]\n", rnd ? 1 : 0);
                 printf("Random Min Delay:    %4d (#SMRANDMIN)        [ms]\n", rmin);
                 printf("Random Max Delay:    %4d (#SMRANDMAX)        [ms]\n", rmax);
+                printf("Random Track Range:  %3u..%3u (#SMRANDTRACKS <min> <max>)\n", rtlo, rthi);
 
                 printf("Drive Speed Normal:  %3d (#SMNORMALSPEED)    [0..127]\n", drivespeed1);
                 printf("Drive Speed Max:     %3d (#SMMAXSPEED)       [0..127]\n", drivespeed2);
@@ -1063,7 +1078,7 @@ void loop()
             {
                 long v;
                 if (parseLongArg(cmd, v)) {
-                    preferences.putInt(PREFERENCE_MARCSOUND_STARTUP, (int)v);
+                    preferences.putInt(PREFERENCE_SHADOWSOUND_STARTUP, (int)v);
                     printf("Startup Sound: %ld\n", v);
                 } else {
                     printf("Usage: #SMSTARTUP <track|-1>\n");
@@ -1073,8 +1088,8 @@ void loop()
             {
                 uint32_t v;
                 if (parseUIntInRange(cmd, v, 0, 60000, "Usage: #SMRANDMIN <ms>")) {
-                    preferences.putInt(PREFERENCE_MARCSOUND_RANDOM_MIN, (int)v);
-                    sMarcSound.setRandomMin(v);
+                    preferences.putInt(PREFERENCE_SHADOWSOUND_RANDOM_MIN, (int)v);
+                    sShadowSound.setRandomMin(v);
                     printf("Random Min: %u\n", v);
                 }
             }
@@ -1082,21 +1097,21 @@ void loop()
             {
                 uint32_t v;
                 if (parseUIntInRange(cmd, v, 0, 60000, "Usage: #SMRANDMAX <ms>")) {
-                    preferences.putInt(PREFERENCE_MARCSOUND_RANDOM_MAX, (int)v);
-                    sMarcSound.setRandomMax(v);
+                    preferences.putInt(PREFERENCE_SHADOWSOUND_RANDOM_MAX, (int)v);
+                    sShadowSound.setRandomMax(v);
                     printf("Random Max: %u\n", v);
                 }
             }
             CMD("#SMRAND0")
             {
-                preferences.putInt(PREFERENCE_MARCSOUND_RANDOM, false);
-                sMarcSound.stopRandom();
+                preferences.putInt(PREFERENCE_SHADOWSOUND_RANDOM, false);
+                sShadowSound.stopRandom();
                 printf("Random Disabled.\n");
             }
             CMD("#SMRAND1")
             {
-                preferences.putBool(PREFERENCE_MARCSOUND_RANDOM, true);
-                sMarcSound.startRandom();
+                preferences.putBool(PREFERENCE_SHADOWSOUND_RANDOM, true);
+                sShadowSound.startRandom();
                 printf("Random Enabled.\n");
             }
             CMD("#SMNORMALSPEED")
@@ -1198,7 +1213,7 @@ void loop()
             CMD("#SMPLAY")
             {
                 String key(cmd); key.trim();
-                MarcduinoButtonAction* btn = MarcduinoButtonAction::findAction(key);
+                ShadowButtonAction* btn = ShadowButtonAction::findAction(key);
                 if (btn) btn->trigger();
                 else printf("Trigger Not Found: %s\n", key.c_str());
             }
@@ -1210,7 +1225,7 @@ void loop()
                 if (valp) {
                     *valp++ = '\0';
                     String key(keyp); key.trim();
-                    MarcduinoButtonAction* btn = MarcduinoButtonAction::findAction(key);
+                    ShadowButtonAction* btn = ShadowButtonAction::findAction(key);
                     if (btn) {
                         String action(valp); action.trim();
                         btn->setAction(action);
@@ -1269,6 +1284,37 @@ void loop()
 
                     refreshNeoPixels();
                     printf("NeoPixel color set to R=%ld G=%ld B=%ld\n", r, g, b);
+                }
+            }
+            // Set the global flat range used for random on all modules
+            CMD("#SMRANDTRACKS")
+            {
+                long lo, hi;
+                if (!parseLongArg(cmd, lo) || !parseLongArg(cmd, hi)) {
+                    printf("Usage: #SMRANDTRACKS <min> <max>\n");
+                } else {
+                    if (lo < 1) lo = 1;
+                    if (hi < lo) hi = lo;
+                    if (hi > 255) hi = 255;
+                    sShadowSound.setRandomTracks((uint16_t)lo, (uint16_t)hi);
+                    preferences.putInt("sm_rtmin", (int)lo);
+                    preferences.putInt("sm_rtmax", (int)hi);
+                    printf("Random tracks range set to %ld..%ld\n", lo, hi);
+                }
+            }
+            // One-shot random in a flat range (useful for testing)
+            CMD("#SMRANDONE")
+            {
+                long lo, hi;
+                if (!parseLongArg(cmd, lo) || !parseLongArg(cmd, hi)) {
+                    printf("Usage: #SMRANDONE <min> <max>\n");
+                } else {
+                    if (lo < 1) lo = 1;
+                    if (hi < lo) hi = lo;
+                    if (hi > 255) hi = 255;
+                    uint16_t pick = (uint16_t)random((int)lo, (int)hi + 1);
+                    sShadowSound.playTrack(pick);
+                    printf("Played random track: %u\n", pick);
                 }
             }
 
