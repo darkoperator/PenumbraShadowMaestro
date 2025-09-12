@@ -169,7 +169,12 @@ public:
         uint16_t pick = (uint16_t)random((int)lo, (int)hi + 1);
         playTrack(pick);
     }
-
+    public:
+    void playRandomTrack(uint16_t lo, uint16_t hi) {
+        if (hi < lo) std::swap(lo, hi);
+        uint16_t pick = lo + (esp_random() % (hi - lo + 1));
+        playTrack(pick);    // uses the flat-track backend for MP3 / DF / DY
+    }
     void stop() {
         switch (fModule) {
             case kDisabled: break;
