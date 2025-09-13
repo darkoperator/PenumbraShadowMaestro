@@ -492,20 +492,76 @@ static inline void maestroRestartAtSub(Stream& port, uint8_t subIndex)
     port.write(pkt, sizeof(pkt));
 }
 
-void sendDomeMaestroSequence(uint8_t subIndex)
+// Simple, non-blocking queueing for Maestro subroutine calls.
+// Avoids overlapping DM/BM sequences by spacing calls by a cooldown.
+static uint32_t kMaestroCooldownMs = 400;      // default spacing between sub restarts
+static uint32_t domeSubBusyUntil = 0;
+static int      domeSubPending   = -1;         // -1 = none
+static uint32_t bodySubBusyUntil = 0;
+static int      bodySubPending   = -1;         // -1 = none
+
+// Query Maestro script running state (best-effort). Returns true if it appears running.
+static bool maestroIsScriptRunning(Stream& port)
+{
+    // Compact Protocol: 0xAE = Get Script Status (returns 0 if not running, non-zero if running)
+    // Best-effort, non-blocking: if no response yet, assume NOT running so we don't stall.
+    port.write((uint8_t)0xAE);
+    if (port.available() > 0) {
+        int b = port.read();
+        return b != 0;
+    }
+    return false; // no response available this instant → treat as not running
+}
+
+static inline void _sendDomeNow(uint8_t subIndex)
 {
     maestroRestartAtSub(MAESTRO_SERIAL, subIndex);
+    domeSubBusyUntil = millis() + kMaestroCooldownMs;
 #ifdef SHADOW_VERBOSE
     SHADOW_VERBOSE("Dome Maestro: sub %u\n", subIndex);
 #endif
 }
 
-void sendBodyMaestroSequence(uint8_t subIndex)
+static inline void _sendBodyNow(uint8_t subIndex)
 {
     maestroRestartAtSub(BODY_MAESTRO_SERIAL, subIndex);
+    bodySubBusyUntil = millis() + kMaestroCooldownMs;
 #ifdef SHADOW_VERBOSE
     SHADOW_VERBOSE("Body Maestro: sub %u\n", subIndex);
 #endif
+}
+
+void sendDomeMaestroSequence(uint8_t subIndex)
+{
+    uint32_t now = millis();
+    if ((int32_t)(now - domeSubBusyUntil) >= 0 && !maestroIsScriptRunning(MAESTRO_SERIAL)) {
+        _sendDomeNow(subIndex);
+    } else {
+        domeSubPending = (int)subIndex; // queue latest
+    }
+}
+
+void sendBodyMaestroSequence(uint8_t subIndex)
+{
+    uint32_t now = millis();
+    if ((int32_t)(now - bodySubBusyUntil) >= 0 && !maestroIsScriptRunning(BODY_MAESTRO_SERIAL)) {
+        _sendBodyNow(subIndex);
+    } else {
+        bodySubPending = (int)subIndex; // queue latest
+    }
+}
+
+static void pumpMaestroQueues()
+{
+    uint32_t now = millis();
+    if (domeSubPending >= 0 && (int32_t)(now - domeSubBusyUntil) >= 0 && !maestroIsScriptRunning(MAESTRO_SERIAL)) {
+        _sendDomeNow((uint8_t)domeSubPending);
+        domeSubPending = -1;
+    }
+    if (bodySubPending >= 0 && (int32_t)(now - bodySubBusyUntil) >= 0 && !maestroIsScriptRunning(BODY_MAESTRO_SERIAL)) {
+        _sendBodyNow((uint8_t)bodySubPending);
+        bodySubPending = -1;
+    }
 }
 
 
@@ -621,6 +677,37 @@ static void _soundLetterCmd(char letter)
 static bool _handleSoundSuffix(const String& sVal)
 {
     if (sVal.length() == 0) return false;
+
+    // S R [min [max]] — one-shot random from range (or current configured range)
+    if (toupper((unsigned char)sVal[0]) == 'R') {
+        String rest = sVal.substring(1);
+        rest.trim();
+        long lo = -1, hi = -1;
+        // Accept formats: "10 25", "10-25", "10" (lo==hi), or empty (use configured)
+        if (rest.length() > 0) {
+            // Replace '-' with space to normalize
+            for (size_t i = 0; i < (size_t)rest.length(); ++i) {
+                if (rest[i] == '-') rest.setCharAt(i, ' ');
+            }
+            char* endp = nullptr;
+            lo = strtol(rest.c_str(), &endp, 10);
+            while (endp && *endp && isspace((unsigned char)*endp)) ++endp;
+            if (endp && *endp) hi = strtol(endp, nullptr, 10);
+            if (lo < 1) lo = 1;
+            if (hi < 1) hi = lo;
+        }
+        uint16_t rtlo = 1, rthi = 255;
+        sShadowSound.getRandomTracks(rtlo, rthi);
+        if (lo < 0) {
+            lo = rtlo; hi = rthi;
+        } else if (hi < 0) {
+            hi = lo;
+        }
+        if (hi < lo) { long t = lo; lo = hi; hi = t; }
+        if (lo < 1) lo = 1; if (hi > 255) hi = 255;
+        sShadowSound.playRandomTrack((uint16_t)lo, (uint16_t)hi);
+        return true;
+    }
 
     // S<letter> ?
     if (sVal.length() == 1 && !isdigit((unsigned char)sVal[0])) {
@@ -955,9 +1042,10 @@ static void printSMHelp()
     printf("      DM<seq>              : Dome Maestro subroutine <seq>\n");
     printf("      BM<seq>              : Body Maestro subroutine <seq>\n");
     printf("      DM<seq>;S<num>       : Run <seq>, then play sound track <num>\n");
-    printf("      DM<seq>;S<letter>    : Run <seq>, then sound command $<LETTER> (e.g. $R start random)\n");
+    printf("      DM<seq>;S R [a [b]]  : Run <seq>, then one-shot random in [a..b] (defaults to configured range)\n");
     printf("      S<num>               : Play sound track <num> only (flat index)\n");
-    printf("      S<letter>            : Sound command $<LETTER> only (e.g. Sf volume max)\n");
+    printf("      S R [a [b]]          : One-shot random sound from [a..b] (or configured range)\n");
+    printf("      S<letter>            : Sound command $<LETTER> (e.g. Sf volume max)\n");
     printf("\n");
     printf("#SMSOUND0                  : Sound Disabled\n");
     printf("#SMSOUND1                  : Sound = MP3 Trigger (38400 baud)\n");
@@ -988,9 +1076,11 @@ static void printSMHelp()
     printf(" - Bind button to Dome sequence:         #SMSET FTbtnUP_MD \"DM58\"\n");
     printf(" - Bind button to Body sequence:         #SMSET btnUP_MD    \"BM2\"\n");
     printf(" - Run sequence + track on press:        #SMSET FTbtnUP_MD \"DM58;S3\"\n");
+    printf(" - Run sequence + random range:          #SMSET FTbtnUP_MD \"DM58;S R 10 25\"\n");
+    printf(" - Sequences auto-queue: if DM/BM is running, next DM/BM will wait then run.\n");
     printf(" - Play only a track on press:           #SMSET btnRight_MD \"S 42\"\n");
     printf(" - Play a track immediately:             #SMPLAY 42\n");
-    printf(" - One-shot random in range:             #SMPLAYRAND 10 25\n");
+    printf(" - One-shot random in range:             #SMPLAYRAND 10 25  (or bind: #SMSET btnX \"S R 10 25\")\n");
     printf(" - Persistent random range + enable:     #SMRANDTRACKS 10 25   (then #SMRAND1)\n");
     printf(" - List all trigger names to bind:       #SMLIST\n");
     printf("\n");
@@ -1503,6 +1593,9 @@ void loop()
 #if defined(SHADOW_SOUND_PLAYER)
     sShadowSound.idle();
 #endif
+
+    // Service any queued Maestro DM/BM subroutine requests
+    pumpMaestroQueues();
 
     // If dome automation is enabled - Call function
     if (domeAutomation && time360DomeTurn > 1999 && time360DomeTurn < 8001 && domeAutoSpeed > 49 && domeAutoSpeed < 101)  

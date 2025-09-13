@@ -82,8 +82,9 @@ See [Penumbra wiring diagram](https://user-images.githubusercontent.com/16616950
 - Bind a button to a Body sequence: `#SMSET btnUP_MD "BM2"`
 - Run a sequence with sound: `#SMSET FTbtnUP_MD "DM58;S3"`
 - Play only a track on press: `#SMSET btnRight_MD "S 42"`
+- Run a sequence with random range: `#SMSET FTbtnUP_MD "DM58;S R 10 25"`
 - Play a track immediately: `#SMPLAY 42`
-- One-shot random from range: `#SMPLAYRAND 10 25`
+- One-shot random from range: `#SMPLAYRAND 10 25` (or bind: `#SMSET btnX "S R 10 25"`)
 - Persistent random range + enable: `#SMRANDTRACKS 10 25` then `#SMRAND1`
 
 ### Sound
