@@ -156,15 +156,13 @@ public:
         playTrack(flat);
     }
 
-    // Flat addressing 1..255
+    // Flat addressing; allow up to 65535 for DY-SV5W
     void playTrack(uint16_t flat) {
-        flat = _clampU16(flat, MP3_MIN_TRACK, MP3_MAX_TRACK);
+        flat = _clampU16(flat, MP3_MIN_TRACK, 65535);
         switch (fModule) {
             case kMP3Trigger:  sendMP3TriggerPlay(flat);     break;
             case kDFMini:      sendDFPlayerPlayFlat(flat);   break;
-            case kDYSV5W:
-                sendDYSV5WPlay(flat);
-                break;
+            case kDYSV5W:      sendDYSV5WPlay(flat);         break;
             default:           break;
         }
     }
@@ -214,14 +212,15 @@ public:
                 break;
             }
             case kDYSV5W: {
-                // ASCII compatibility path
-                int iv = (int)lrintf(v * 30.0f);
-                if (iv < 0) iv = 0; if (iv > 30) iv = 30;
-                char buf[16];
-                snprintf(buf, sizeof(buf), "V%03d", iv);
-                fStream->print(buf); fStream->write('\r'); fStream->write('\n');
-                snprintf(buf, sizeof(buf), "<V%03d>", iv);
-                fStream->print(buf); fStream->write('\r'); fStream->write('\n');
+                // DY-SV5W volume: many firmwares accept <PVV000..1000>. Keep a fallback to Vxxx.
+                int iv1000 = (int)lrintf(v * 1000.0f); if (iv1000 < 0) iv1000 = 0; if (iv1000 > 1000) iv1000 = 1000;
+                char buf[20];
+                snprintf(buf, sizeof(buf), "<PVV%04d>", iv1000);
+                fStream->print(buf); // no CR/LF
+                // Fallback coarse volume 0..30 if firmware expects Vxxx
+                int iv30 = (int)lrintf(v * 30.0f); if (iv30 < 0) iv30 = 0; if (iv30 > 30) iv30 = 30;
+                snprintf(buf, sizeof(buf), "V%03d", iv30);
+                fStream->print(buf);
                 break;
             }
             case kDFMini: {
@@ -348,13 +347,12 @@ private:
 
     // ---- DY-SV5W helpers -----------------------------------------------------
     inline void sendDYSV5WPlay(uint16_t flat) {
-        // DY-SV5W binary: 7E 03 A2 <hi> <lo> EF (Play index)
+        // DY-SV5W: preferred ASCII command matching 5-digit filenames: <P00001>
         if (!fStream) return;
-        if (flat < 1) flat = 1; if (flat > 255) flat = 255;
-        uint8_t hi = (flat >> 8) & 0xFF;
-        uint8_t lo = flat & 0xFF;
-        const uint8_t frame[6] = {0x7E, 0x03, 0xA2, hi, lo, 0xEF};
-        fStream->write(frame, sizeof(frame));
+        if (flat < 1) flat = 1; // allow up to 65535
+        char buf[16];
+        snprintf(buf, sizeof(buf), "<P%05u>", (unsigned)flat);
+        fStream->print(buf); // no CR/LF
     }
     inline void sendDYSV5W(const char* s) {
         // Best-effort ASCII support for volume and misc; keep minimal

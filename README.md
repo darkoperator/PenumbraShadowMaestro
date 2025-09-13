@@ -84,6 +84,7 @@ See [Penumbra wiring diagram](https://user-images.githubusercontent.com/16616950
 - Play only a track on press: `#SMSET btnRight_MD "S 42"`
 - Run a sequence with random range: `#SMSET FTbtnUP_MD "DM58;S R 10 25"`
 - Play a track immediately: `#SMPLAY 42`
+ - Play a track immediately: `#SMPLAY 42` (DY supports up to 65535 → 00042.mp3)
 - One-shot random from range: `#SMPLAYRAND 10 25` (or bind: `#SMSET btnX "S R 10 25"`)
 - Persistent random range + enable: `#SMRANDTRACKS 10 25` then `#SMRAND1`
 
@@ -102,6 +103,7 @@ See [Penumbra wiring diagram](https://user-images.githubusercontent.com/16616950
 | `#SMRAND1` | Enable random playback |
 | `#SMRANDTRACKS a b` | (New) limit random sounds to tracks *a..b* |
 | `#SMCONFIG` | Show drive/sound config |
+| `#SMCARD` | Check audio/card status (DY sends test <P00001>) |
 
 ### NeoPixels
 | Command | Description |

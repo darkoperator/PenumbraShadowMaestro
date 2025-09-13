@@ -1052,6 +1052,7 @@ static void printSMHelp()
     printf("#SMSOUND2                  : Sound = DFPlayer Mini (9600 baud)\n");
     printf("#SMSOUND3                  : Sound = DY-SV5W (9600 baud)\n");
     printf("#SMVOLUME <0..1000>        : Sound volume (0=muted .. 1000=max)\n");
+    printf("#SMCARD                    : Check audio/card module status and send a test.\n");
     printf("#SMSTARTUP <track|-1>      : Startup sound (track number) or -1 to disable\n");
     printf("#SMRAND0                   : Disable random sounds\n");
     printf("#SMRAND1                   : Enable random sounds (uses current random timing)\n");
@@ -1079,7 +1080,7 @@ static void printSMHelp()
     printf(" - Run sequence + random range:          #SMSET FTbtnUP_MD \"DM58;S R 10 25\"\n");
     printf(" - Sequences auto-queue: if DM/BM is running, next DM/BM will wait then run.\n");
     printf(" - Play only a track on press:           #SMSET btnRight_MD \"S 42\"\n");
-    printf(" - Play a track immediately:             #SMPLAY 42\n");
+    printf(" - Play a track immediately:             #SMPLAY 42   (DY supports up to 65535 -> 00042.mp3)\n");
     printf(" - One-shot random in range:             #SMPLAYRAND 10 25  (or bind: #SMSET btnX \"S R 10 25\")\n");
     printf(" - Persistent random range + enable:     #SMRANDTRACKS 10 25   (then #SMRAND1)\n");
     printf(" - List all trigger names to bind:       #SMLIST\n");
@@ -1232,6 +1233,25 @@ static void routeOne(char* line)
         printf("NeoPixel Count:      %3d (#SMNEOCOUNT)\n", neopixelCount);
         printf("NeoPixel Color:   R=%3d G=%3d B=%3d (#SMNEOCOLOR <r> <g> <b>)\n",
                neopixelR, neopixelG, neopixelB);
+    }
+    CMD("#SMCARD")
+    {
+        SDSound::Module smod = (SDSound::Module)preferences.getInt(PREFERENCE_SHADOWSOUND, SHADOW_SOUND_PLAYER);
+        printf("Card/Audio status\n");
+        printf("-----------------\n");
+        printf("Sound Module: %s\n", SDSound::moduleName(smod));
+        printf("Serial baud:  %lu\n", (unsigned long)SDSound::baudFor(smod));
+        if (smod == SDSound::kDYSV5W) {
+            printf("DY-SV5W expects filenames like 00001.mp3 in root.\n");
+            printf("Sending test play: <P00001> ...\n");
+            sShadowSound.playTrack(1);
+        } else if (smod == SDSound::kMP3Trigger) {
+            printf("MP3 Trigger test: 't' + 1 byte will be sent by #SMPLAY.\n");
+        } else if (smod == SDSound::kDFMini) {
+            printf("DFPlayer test: use #SMPLAY 1 to verify playback.\n");
+        } else {
+            printf("Sound disabled. Use #SMSOUND1/2/3 to select a module.\n");
+        }
     }
     CMD("#SMDUMP")
     {
@@ -1429,17 +1449,20 @@ static void routeOne(char* line)
         // Accept "#SMPLAY 3" or "#SMPLAY3"
         _skip_ws(cmd);
 
-        if (isdigit((unsigned char)*cmd)) {
-            char* endp = nullptr;
-            long v = strtol(cmd, &endp, 10);
-            if (endp == cmd) {
-                printf("Usage: #SMPLAY <1..255 | TriggerName>\n");
-                return;
-            }
-            if (v < 1)   v = 1;
-            if (v > 255) v = 255;
+    if (isdigit((unsigned char)*cmd)) {
+        char* endp = nullptr;
+        long v = strtol(cmd, &endp, 10);
+        if (endp == cmd) {
+            printf("Usage: #SMPLAY <1..255 | TriggerName>\n");
+            return;
+        }
+        if (v < 1)   v = 1;
+        // Allow larger tracks for DY-SV5W (5-digit filenames 00001.mp3 ...)
+        SDSound::Module cur = (SDSound::Module)preferences.getInt(PREFERENCE_SHADOWSOUND, SHADOW_SOUND_PLAYER);
+        long vmax = (cur == SDSound::kDYSV5W) ? 65535 : 255;
+        if (v > vmax) v = vmax;
 
-            const uint16_t track = (uint16_t)v;
+        const uint16_t track = (uint16_t)v;
 
             // ---- debug: show exactly what we parsed
             printf("[SMPLAY %lu] parsed: %u\n", smplay_seq, (unsigned)track);
