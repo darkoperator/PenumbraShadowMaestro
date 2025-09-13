@@ -68,12 +68,23 @@ See [Penumbra wiring diagram](https://user-images.githubusercontent.com/16616950
 ### Core
 | Command | Description |
 |---------|-------------|
+| `#SMHELP` | Show command help |
+| `#SMDUMP` | Print restorable commands for current config |
 | `#SMRESTART` | Reboot controller |
 | `#SMZERO` | Clear preferences & unpair |
 | `#SMLIST` | List button mappings |
 | `#SMDEL<trigger>` | Reset a trigger |
 | `#SMPLAY<trigger>` | Run the trigger’s action |
 | `#SMSET<trigger> <action>` | Set trigger action (Marcduino/Meastro/Sound) |
+
+#### Examples
+- Bind a button to a Dome sequence: `#SMSET FTbtnUP_MD "DM58"`
+- Bind a button to a Body sequence: `#SMSET btnUP_MD "BM2"`
+- Run a sequence with sound: `#SMSET FTbtnUP_MD "DM58;S3"`
+- Play only a track on press: `#SMSET btnRight_MD "S 42"`
+- Play a track immediately: `#SMPLAY 42`
+- One-shot random from range: `#SMPLAYRAND 10 25`
+- Persistent random range + enable: `#SMRANDTRACKS 10 25` then `#SMRAND1`
 
 ### Sound
 | Command | Description |
@@ -125,6 +136,11 @@ See [Penumbra wiring diagram](https://user-images.githubusercontent.com/16616950
   - **Delay range** = `#SMRANDMIN` .. `#SMRANDMAX`
   - **Track range** = `#SMRANDTRACKS` (or full 1-255 if not set)
 - SparkFun MP3 Trigger has **no banks**; DFPlayer & DY-SV5W do but the new “flat” random mode plays by number for all.
+
+## Backup & Restore
+
+- Export your current configuration as restorable commands with `#SMDUMP`.
+- Save the output. After a factory reset (`#SMZERO`) or board swap, paste the dumped lines into the console to restore all settings and trigger bindings.
 
 ---
 

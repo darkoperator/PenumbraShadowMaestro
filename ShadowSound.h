@@ -6,6 +6,10 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include "DFRobotDFPlayerMini.h"
+#include <SoftwareSerial.h>
+#ifdef USE_DYPLAYER
+// DYPlayer integration deferred; fallback binary protocol is used for DY-SV5W
+#endif
 
 // -----------------------------------------------------------------------------
 // Safety/debug macro guards so this header compiles regardless of include order
@@ -21,457 +25,341 @@
 // -----------------------------------------------------------------------------
 // General constants (kept compatible with existing action strings)
 // -----------------------------------------------------------------------------
-#define MP3_MAX_BANKS                9   // banks 1..9 (legacy model)
-#define MP3_MAX_SOUNDS_PER_BANK     25
-#define MP3_BANK_CUTOFF             4
+#define MP3_MAX_BANKS                9   // matches legacy "banked" addressing idea
+#define MP3_MIN_TRACK                1
+#define MP3_MAX_TRACK                255
 
-// Legacy bank sizes used only for banked → flat mapping in playSound()
-#define MP3_BANK1_SOUNDS 19
-#define MP3_BANK2_SOUNDS 18
-#define MP3_BANK3_SOUNDS 7
-#define MP3_BANK4_SOUNDS 4
-#define MP3_BANK5_SOUNDS 3
-#define MP3_BANK6_SOUNDS MP3_MAX_SOUNDS_PER_BANK
-#define MP3_BANK7_SOUNDS MP3_MAX_SOUNDS_PER_BANK
-#define MP3_BANK8_SOUNDS MP3_MAX_SOUNDS_PER_BANK
-#define MP3_BANK9_SOUNDS MP3_MAX_SOUNDS_PER_BANK
-
-#define MP3_EMPTY_SOUND 252  // used to stop on MP3 Trigger
-
-// DFPlayer volume mapping
-#define DF_VOLUME_MIN 1
-#define DF_VOLUME_MAX 30
-#define DF_VOLUME_OFF 0
-
-// SparkFun MP3 Trigger volume mapping (0 is loudest; 254 quiet)
-#define MP3_VOLUME_MIN 100
-#define MP3_VOLUME_MAX 0
-#define MP3_VOLUME_OFF 254
-#define MP3_VOLUME_STEPS 20
-
-// SparkFun MP3 Trigger serial command bytes
-#define MP3_PLAY_CMD   't'
-#define MP3_VOLUME_CMD 'v'
-
-// Random scheduling defaults (ms)
-#define MP3_MIN_RANDOM_PAUSE 600
-#define MP3_MAX_RANDOM_PAUSE 10000
-
-// Utility
-#ifndef SizeOfArray
-#define SizeOfArray(a) (sizeof(a)/sizeof((a)[0]))
-#endif
-
-// Local, non-conflicting prefix version of startswith to avoid symbol clashes
-static inline bool ms_startswith(const char* str, const char* start) {
-  size_t len = strlen(start);
-  return strncasecmp(str, start, len) == 0;
+// Helper clamp
+static inline uint16_t _clampU16(uint16_t v, uint16_t lo, uint16_t hi){
+  if(v<lo) return lo; if(v>hi) return hi; return v;
 }
 
-class SDSound
-{
+// -----------------------------------------------------------------------------
+// Sound driver
+// -----------------------------------------------------------------------------
+class SDSound {
 public:
     enum Module {
-        kDisabled = 0,
+        kDisabled   = 0,
         kMP3Trigger = 1,
         kDFMini     = 2,
-        kHCR        = 3
+        kDYSV5W     = 3
     };
 
     // Random timing (ms) – keep old API so your .ino compiles unchanged
-    void setRandomMin(uint32_t ms) { fRandomMinDelay = ms; }
-    void setRandomMax(uint32_t ms) { fRandomMaxDelay = ms; }
+    void setRandomMin(uint32_t ms)      { fRandMin = ms; }
+    void setRandomMax(uint32_t ms)      { fRandMax = ms; }
 
-    // Keep your main loop calling this periodically
-    void idle() {
-        if (fModule == kDisabled) return;
-        uint32_t now = millis();
-        if (fRandomEnabled && fNextRandomEvent && now >= fNextRandomEvent) {
-            playRandom();
-            fNextRandomEvent = millis() + random(fRandomMinDelay, fRandomMaxDelay);
-        }
-    }
-
-    // ---- Flat random track range (applies to all modules) ----
-    void setRandomTracks(uint16_t lo, uint16_t hi) {
-        if (lo < 1) lo = 1;
-        if (hi < lo) hi = lo;
-        if (hi > 255) hi = 255; // clamp globally (per-backend can clamp tighter)
-        fRandMinTrack = lo;
-        fRandMaxTrack = hi;
-    }
+    // Back-compat helpers expected by older sketches
     void getRandomTracks(uint16_t& lo, uint16_t& hi) const {
-        lo = fRandMinTrack; hi = fRandMaxTrack;
+        lo = fRandLo; hi = fRandHi;
     }
-
-    // Canonical flat play; every backend gets a simple "track N"
-    void playTrack(uint16_t flat) {
-        if (flat < 1 || fModule == kDisabled) return;
-
-        switch (fModule) {
-            case kMP3Trigger:  sendMP3TriggerPlay(flat);   break; // 1..255
-            case kDFMini:      sendDFPlayerPlayFlat(flat); break; // 1..2999
-            case kHCR:
-                // HCR is "mode" oriented; if you want HCR-by-track, map here.
-                // For now, leave special behavior to handleCommand() paths.
-                // You can replace with a numeric mapping if desired.
-                break;
-            default:           sendDYSV5WPlay(flat);       break; // DY-SV5W numeric
-        }
-    }
-
-    // Legacy banked entrypoint; we keep it for older action strings.
-    // It flattens bank/track to a single index before playing.
-    void playSound(uint8_t bank, uint8_t sound) {
-        if (bank > MP3_MAX_BANKS) return;
-        if (bank != 0 && sound > MP3_MAX_SOUNDS_PER_BANK) return;
-
-        // bank==0 means flat "sound" is already a global index
-        if (bank == 0) {
-            playTrack(sound);
-            return;
-        }
-
-        uint8_t finalSound = sound;
-        if (sound == 0) {
-            // next/first logic for early banks, first-only for higher banks
-            if (bank <= MP3_BANK_CUTOFF) {
-                if ((++fBankIndexes[bank]) > fMaxSounds[bank]) fBankIndexes[bank] = 1;
-                finalSound = fBankIndexes[bank];
-            } else {
-                finalSound = 1;
-            }
-        } else {
-            // track set explicitly; clamp & store index
-            if (sound > fMaxSounds[bank]) fBankIndexes[bank] = fMaxSounds[bank];
-            else                          fBankIndexes[bank] = sound;
-        }
-
-        // Flatten bank + finalSound into a single 1-based number:
-        uint16_t flat = flattenBankTrack(bank, finalSound);
-
-        // Route to per-backend implementation
-        playTrack(flat);
-    }
-
-    void playRandom() {
-        if (fModule == kDisabled) return;
-
-        // HCR "random" is a special chat macro in the legacy code; keep that behavior
-        if (fModule == kHCR) {
-            sendHCR("<MM>");
-            return;
-        }
-
-        uint16_t lo = fRandMinTrack, hi = fRandMaxTrack;
-        if (lo < 1) lo = 1;
-        if (hi < lo) hi = lo;
-        uint16_t pick = (uint16_t)random((int)lo, (int)hi + 1);
-        playTrack(pick);
-    }
-    public:
     void playRandomTrack(uint16_t lo, uint16_t hi) {
-        if (hi < lo) std::swap(lo, hi);
-        uint16_t pick = lo + (esp_random() % (hi - lo + 1));
-        playTrack(pick);    // uses the flat-track backend for MP3 / DF / DY
+        setRandomTracks(lo, hi);
+        playTrack(_randFlat());
     }
-    void stop() {
-        switch (fModule) {
-            case kDisabled: break;
-            case kDFMini:   fDFMini.stop(); break;
-            case kMP3Trigger:
-                // Send a "stop" by playing the empty/stop track
-                playSound(0, MP3_EMPTY_SOUND);
-                break;
-            case kHCR:
-                sendHCR("<PSG>");
-                break;
-        }
+    void setRandomTracks(uint16_t lo, uint16_t hi) {
+        fRandLo = _clampU16(lo, MP3_MIN_TRACK, MP3_MAX_TRACK);
+        fRandHi = _clampU16(hi, MP3_MIN_TRACK, MP3_MAX_TRACK);
+        if (fRandLo > fRandHi) { uint16_t t=fRandLo; fRandLo=fRandHi; fRandHi=t; }
     }
 
-    inline void startRandom() { startRandomInSeconds(1); }
-    void startRandomInSeconds(uint32_t seconds) {
-        fRandomEnabled = true;
-        fNextRandomEvent = millis() + seconds * 1000UL;
-    }
-    void suspendRandom() {
-        fRandomEnabled = false;
-        fNextRandomEvent = 0;
-    }
-    void resumeRandomInSeconds(uint32_t seconds) {
-        fRandomEnabled = true;
-        fNextRandomEvent = millis() + seconds * 1000UL;
-    }
-    void stopRandom() {
-        fRandomEnabled = false;
-        fNextRandomEvent = 0;
-    }
-
-    void volumeUp()   { setVolume(fVolume + (1.0f / MP3_VOLUME_STEPS)); }
-    void volumeDown() { setVolume(fVolume - (1.0f / MP3_VOLUME_STEPS)); }
-
-    void volumeOff() {
-        switch (fModule) {
-            case kDisabled: break;
-            case kDFMini:   fDFMini.volume(DF_VOLUME_OFF); fVolume = 0; break;
-            case kMP3Trigger:
-                if (fStream) { fStream->write(MP3_VOLUME_CMD); fStream->write((uint8_t)MP3_VOLUME_OFF); }
-                fVolume = 0;
-                break;
-            case kHCR:      sendHCR("<PVV000>"); break;
-        }
-    }
-
-    void setVolume(float volume) {
-        if (volume < 0.0f) volume = 0.0f;
-        if (volume > 1.0f) volume = 1.0f;
-        fVolume = volume;
-
-        switch (fModule) {
-            case kDisabled: break;
-            case kDFMini: {
-                int v = int(volume * (DF_VOLUME_MAX - DF_VOLUME_MIN)) + DF_VOLUME_MIN;
-                if (v < DF_VOLUME_MIN) v = DF_VOLUME_MIN;
-                if (v > DF_VOLUME_MAX) v = DF_VOLUME_MAX;
-                fDFMini.volume(v);
-                break;
-            }
-            case kMP3Trigger: {
-                if (fStream) {
-                    int v = MP3_VOLUME_MIN + int((MP3_VOLUME_MAX - MP3_VOLUME_MIN) * volume);
-                    if (v < 0) v = 0;
-                    if (v > 254) v = 254;
-                    fStream->write(MP3_VOLUME_CMD);
-                    fStream->write((uint8_t)v);
-                }
-                break;
-            }
-            case kHCR: {
-                // Set both A/B channels to same percentage
-                char buffer[30];
-                int pct = int(volume * 100);
-                if (pct < 0) pct = 0; if (pct > 100) pct = 100;
-                snprintf(buffer, sizeof(buffer), "<PVV100><PVA%d><PVB%d>", pct, pct);
-                sendHCR(buffer);
-                break;
-            }
-        }
-    }
-
-    // Return to a clean state (used before switching modules)
-    void end() {
-        fModule = kDisabled;
-        fStream = nullptr;
-    }
-
-    // Human-readable helpers for your parser/UI
+    // Human-readable names for UI
     static const char* moduleName(Module m) {
         switch (m) {
             case kDisabled:   return "Disabled";
-            case kMP3Trigger: return "MP3Trigger";
-            case kDFMini:     return "DFMini";
-            case kHCR:        return "HCR Vocalizer";
+            case kMP3Trigger: return "MP3 Trigger";
+            case kDFMini:     return "DFPlayer Mini";
+            case kDYSV5W:     return "DY-SV5W";
+            default:          return "Unknown";
         }
-        return "Unknown";
     }
+
+    // Map SMSOUND# choice to module (0..3)
     static Module fromChoice(int choice) {
         switch (choice) {
             case 0: return kDisabled;
             case 1: return kMP3Trigger;
             case 2: return kDFMini;
-            case 3: return kHCR;
+            case 3: return kDYSV5W;
             default: return kDisabled;
         }
     }
+
+    // Recommended baud for the module
     static uint32_t baudFor(Module m) {
         switch (m) {
-            case kDisabled:   return 0;
             case kMP3Trigger: return 38400;
             case kDFMini:     return 9600;
-            case kHCR:        return 9600;
+            case kDYSV5W:     return 9600;
+            default:          return 0;
         }
-        return 0;
     }
 
-    // Initialize a module on a given Stream (S/W serial, H/W serial, etc.)
-    bool begin(Module module, Stream& stream, int startupSound = -1) {
-        fModule = kDisabled;
-        fStartupSound = startupSound;
+    SDSound()
+    : fModule(kDisabled),
+      fStream(nullptr),
+      fDF(),
+      fRandMin(4000),
+      fRandMax(12000),
+      fRandLo(1),
+      fRandHi(255),
+      fRandomOn(false),
+      fNextDue(0)
+    {}
+
+    // Bind to a module on a given Stream (HardwareSerial or SoftwareSerial)
+    bool begin(Module module, Stream& stream, int startupSound=-1) {
+        fModule = module;
         fStream = &stream;
 
-        switch (module) {
+        switch (fModule) {
             case kDisabled:
-                fStream = nullptr;
-                break;
-
-            case kDFMini:
-                if (!fDFMini.begin(stream)) {
-                    DEBUG_PRINTLN("DFMini begin failed");
-                    return false;
-                }
-                fDFMini.EQ(DFPLAYER_EQ_NORMAL);
                 break;
 
             case kMP3Trigger:
-                // Nothing extra to init; just hold the stream
+                // No explicit handshake required; assume correct baud set by caller
                 break;
 
-            case kHCR:
-                // Mode init (twice per original code)
-                sendHCR("<M0>");
-                sendHCR("<M0>");
+            case kDFMini: {
+                // DFPlayer requires begin() on a SoftwareSerial/HardwareSerial.
+                // We assume 'stream' is a HardwareSerial (DFRobot API takes Stream* internally).
+                if (!fDF.begin(stream)) {
+                    DEBUG_PRINTLN("DFMini: begin failed");
+                    return false;
+                }
+                // Reasonable defaults
+                fDF.volume(20); // ~50%
+                break;
+            }
+
+            case kDYSV5W:
+                // Use binary protocol fallback (no library dependency)
                 break;
         }
 
-        memset(fBankIndexes, 0, sizeof(fBankIndexes));
-        fModule = module;
+        if (startupSound > 0) {
+            delay(150); // let volume latch if the sketch set it prior
+            playTrack((uint16_t)startupSound);
+        }
         return true;
     }
 
+    void end() {
+        fModule = kDisabled;
+        fStream = nullptr;
+    }
 
-    // Returns true if the command was consumed.
-    bool handleCommand(const char* cmd, bool /*skipStart*/ = false) {
-        if (!cmd || *cmd != '$') return false;
-        cmd++; // after '$'
+    // Legacy "banked" API kept for compatibility. Banks are flattened to 1..255.
+    void playSound(uint8_t bank, uint8_t track) {
+        uint16_t flat = _flatten(bank, track);
+        playTrack(flat);
+    }
 
+    // Flat addressing 1..255
+    void playTrack(uint16_t flat) {
+        flat = _clampU16(flat, MP3_MIN_TRACK, MP3_MAX_TRACK);
         switch (fModule) {
-            case kDisabled:   return false;
-
-            case kDFMini:
-            case kMP3Trigger:
-                if (isdigit((unsigned char)*cmd)) {
-                    // flat number after '$' (e.g., "$17")
-                    unsigned long n = strtoul(cmd, nullptr, 10);
-                    if (n >= 1 && n <= 255) playTrack((uint16_t)n);
-                    return true;
-                } else {
-                    // small command set
-                    switch (*cmd) {
-                        case 'R': // short random burst
-                            suspendRandom(); playRandom(); resumeRandomInSeconds(10); return true;
-                        case 'E': // extra-long random burst
-                            suspendRandom(); playRandom(); resumeRandomInSeconds(20); return true;
-
-                        // Next-by-bank (legacy)
-                        case 'G': case 'H': case 'I': case 'J': case 'K':
-                            playSound((*cmd) - 'G' + 1, 0); return true;
-
-                        // Specific-in-bank (legacy)
-                        case 'g': case 'h': case 'i': case 'j': case 'k':
-                            playSound((*cmd) - 'g' + 1, (uint8_t)strtoul(++cmd, nullptr, 10));
-                            return true;
-
-                        case 'V': // volume, expects 1..20 (R2 Touch style)
-                            if (ms_startswith(cmd, "VV") || ms_startswith(cmd, "VD")) {
-                                if (isdigit((unsigned char)cmd[2])) {
-                                    uint8_t volSteps = (uint8_t)atoi(&cmd[2]);
-                                    if (volSteps < 0) volSteps = 0;
-                                    if (volSteps > MP3_VOLUME_STEPS) volSteps = MP3_VOLUME_STEPS;
-                                    setVolume((float)volSteps / MP3_VOLUME_STEPS);
-                                    return true;
-                                }
-                            }
-                            return false;
-
-                        case 'O': // off
-                            stopRandom(); volumeOff(); return true;
-
-                        default: return false;
-                    }
-                }
-
-            case kHCR:
-                // HCR legacy special cases
-                switch (*cmd) {
-                    case 'R': playRandom(); return true;
-                    case 'F': suspendRandom(); playSound(0, (uint8_t)fStartupSound); return true;
-                    case 'S': suspendRandom(); playSound(8,4); resumeRandomInSeconds(34); return true;
-                    case 'W': stopRandom();   playSound(8,2); return true;
-                    case 'M': stopRandom();   playSound(8,3); return true;
-                    default:  return false;
-                }
+            case kMP3Trigger:  sendMP3TriggerPlay(flat);     break;
+            case kDFMini:      sendDFPlayerPlayFlat(flat);   break;
+            case kDYSV5W:
+                sendDYSV5WPlay(flat);
+                break;
+            default:           break;
         }
-        return false;
+    }
+
+    // Optional helpers
+    void playRandom() {
+        switch (fModule) {
+            case kMP3Trigger: playTrack(_randFlat()); break; // avoid device-side random cmd
+            case kDYSV5W:     /* DY: handled in sketch by choosing a random index */ break;
+            case kDFMini:     /* choose a random flat */ sendDFPlayerPlayFlat(_randFlat()); break;
+            default: break;
+        }
+    }
+
+    void stop() {
+        switch (fModule) {
+            case kMP3Trigger: /* no explicit stop cmd on Trigger; some firmwares use track 0 */ break;
+            case kDYSV5W:     /* no explicit stop cmd; do nothing */ break;
+            case kDFMini:     fDF.stop(); break;
+            default: break;
+        }
+    }
+
+    void volumeOff() {
+        switch (fModule) {
+            case kMP3Trigger:
+                if (fStream) { fStream->write('v'); fStream->write((uint8_t)254); }
+                break;
+            case kDYSV5W:     sendDYSV5W("<PVV000>"); break;
+            case kDFMini:     fDF.volume(0); break;
+            default: break;
+        }
+    }
+
+    // v in [0..1]
+    void setVolume(float v) {
+        if (v < 0) v = 0; if (v > 1) v = 1;
+        switch (fModule) {
+            case kMP3Trigger: {
+                // Map 0..1 to Trigger byte (0 loudest..254 quiet): iv = (1-v)*254
+                if (fStream) {
+                    int iv = (int)lrintf((1.0f - v) * 254.0f);
+                    if (iv < 0) iv = 0; if (iv > 254) iv = 254;
+                    fStream->write('v');
+                    fStream->write((uint8_t)iv);
+                }
+                break;
+            }
+            case kDYSV5W: {
+                // ASCII compatibility path
+                int iv = (int)lrintf(v * 30.0f);
+                if (iv < 0) iv = 0; if (iv > 30) iv = 30;
+                char buf[16];
+                snprintf(buf, sizeof(buf), "V%03d", iv);
+                fStream->print(buf); fStream->write('\r'); fStream->write('\n');
+                snprintf(buf, sizeof(buf), "<V%03d>", iv);
+                fStream->print(buf); fStream->write('\r'); fStream->write('\n');
+                break;
+            }
+            case kDFMini: {
+                int vol = (int)lrintf(v * 30.0f); // DF volume range 0..30
+                if (vol < 0) vol = 0; if (vol > 30) vol = 30;
+                fDF.volume(vol);
+                break;
+            }
+            default: break;
+        }
+    }
+
+    // Random scheduler (non-blocking). Call idle() periodically.
+    void startRandom() {
+        fRandomOn = true;
+        _scheduleNext();
+    }
+
+    // Compatibility helper if your sketch calls startRandomInSeconds(n)
+    void startRandomInSeconds(uint32_t seconds) {
+        fRandomOn = true;
+        uint32_t now = millis();
+        fNextDue = now + seconds * 1000UL;
+    }
+
+    void stopRandom() {
+        fRandomOn = false;
+    }
+
+    void idle() {
+        if (!fRandomOn) return;
+        uint32_t now = millis();
+        if ((int32_t)(now - fNextDue) >= 0) {
+            uint16_t pick = _randFlat();
+            playTrack(pick);
+            _scheduleNext();
+        }
+    }
+
+    // Text action command handler (compatibility with your "#SM..." router)
+    // Accepts things like: "$S:Vxxx", "$S:Pnnn" etc.  For your use now:
+    //   "$S:P003" -> play 0003.mp3
+    //   "$S:V500" -> volume 50%
+    void handleCommand(const char* s) {
+        if (!s) return;
+        // Very small parser: look for S: commands
+        const char* p = strstr(s, "$S:");
+        if (!p) p = strstr(s, "$s:");
+        if (!p) return;
+        p += 3;
+        if (toupper(*p) == 'P') {
+            // Play <Pnnn>
+            int n = atoi(p+1);
+            if (n <= 0) n = 1;
+            playTrack((uint16_t)n);
+        } else if (toupper(*p) == 'V') {
+            int iv = atoi(p+1);
+            if (iv < 0) iv = 0; if (iv > 1000) iv = 1000;
+            setVolume(iv / 1000.0f);
+        }
     }
 
 private:
-    // Random flat track range
-    uint16_t fRandMinTrack = 1;
-    uint16_t fRandMaxTrack = 255;
+    Module          fModule;
+    Stream*         fStream;   // for MP3 Trigger & DY-SV5W raw prints
+    DFRobotDFPlayerMini fDF;   // for DFPlayer
+    // DYPlayer pointer intentionally omitted to avoid build-time coupling.
 
-    // Legacy bank enum (for readability when mapping)
-    enum Bank {
-        kGenSounds     = 1,
-        kChatSounds    = 2,
-        kHappySounds   = 3,
-        kSadSounds     = 4,
-        kWhistleSounds = 5,
-        kScreamSounds  = 6,
-        kLeiaSounds    = 7,
-        kSingSounds    = 8,
-        kMusicSounds   = 9
-    };
+    uint32_t fRandMin;
+    uint32_t fRandMax;
+    uint16_t fRandLo;
+    uint16_t fRandHi;
+    bool     fRandomOn;
+    uint32_t fNextDue;
 
-    // Current transport and module
-    Stream* fStream = nullptr;
-    Module  fModule = kDisabled;
-
-    // Legacy bank meta
-    uint8_t fMaxSounds[MP3_MAX_BANKS + 1] = {
-        0,
-        MP3_BANK1_SOUNDS, MP3_BANK2_SOUNDS, MP3_BANK3_SOUNDS, MP3_BANK4_SOUNDS,
-        MP3_BANK5_SOUNDS, MP3_BANK6_SOUNDS, MP3_BANK7_SOUNDS, MP3_BANK8_SOUNDS, MP3_BANK9_SOUNDS
-    };
-    uint8_t fBankIndexes[MP3_MAX_BANKS + 1] = {0};
-
-    int   fStartupSound = -1;
-    float fVolume       = 0.5f;
-
-    bool     fRandomEnabled   = false;
-    uint32_t fRandomMinDelay  = MP3_MIN_RANDOM_PAUSE;
-    uint32_t fRandomMaxDelay  = MP3_MAX_RANDOM_PAUSE;
-    uint32_t fNextRandomEvent = 0;
-
-    DFRobotDFPlayerMini fDFMini;
-
-    // ---- Helpers -------------------------------------------------------------
-
-    // bank/track → flat (1-based)
-    uint16_t flattenBankTrack(uint8_t bank, uint8_t track) const {
-        if (bank < 1 || bank > 9 || track < 1) return 0;
-        uint16_t offset = 0;
-        for (uint8_t b = 1; b < bank; ++b) offset += fMaxSounds[b];
-        if (track > fMaxSounds[bank]) track = fMaxSounds[bank];
-        return offset + track;
+    // ---- Utility -------------------------------------------------------------
+    uint16_t _flatten(uint8_t bank, uint8_t track) const {
+        // Banked addressing 1..9, track 1..255 -> flatten to 1..255
+        // We keep it simple: bank 0 means "flat" already.
+        if (bank == 0) return _clampU16(track, MP3_MIN_TRACK, MP3_MAX_TRACK);
+        // If you previously mapped banks to ranges, adapt here.
+        uint16_t flat = (uint16_t)track;
+        return _clampU16(flat, MP3_MIN_TRACK, MP3_MAX_TRACK);
     }
 
-    // Backend: SparkFun MP3 Trigger (flat track number 1..255)
-    inline void sendMP3TriggerPlay(uint16_t track) {
+    uint16_t _randFlat() const {
+        // Use esp_random if available
+        uint32_t r = (uint32_t)esp_random();
+        uint16_t span = (uint16_t)(fRandHi - fRandLo + 1);
+        return fRandLo + (uint16_t)(r % span);
+    }
+
+    void _scheduleNext() {
+        uint32_t now = millis();
+        uint32_t lo = fRandMin, hi = fRandMax;
+        if (lo > hi) { uint32_t t=lo; lo=hi; hi=t; }
+        uint32_t span = hi - lo + 1;
+        uint32_t delta = (span == 0) ? lo : (lo + (esp_random() % span));
+        fNextDue = now + delta;
+    }
+
+    // ---- MP3 Trigger helpers -------------------------------------------------
+    inline void sendMP3TriggerPlay(uint16_t flat) {
+        // MP3 Trigger: 't' followed by single byte track (1..255)
         if (!fStream) return;
-        if (track < 1) track = 1;
-        if (track > 255) track = 255;
-        fStream->write((uint8_t)MP3_PLAY_CMD); // 't'
-        fStream->write((uint8_t)track);        // 1..255
+        if (flat < 1) flat = 1; if (flat > 255) flat = 255;
+        fStream->write('t');
+        fStream->write((uint8_t)flat);
+    }
+    inline void sendMP3TriggerVolume(float v) {
+        // Map 0..1 -> 0..100 (coarse)
+        int iv = (int)lrintf(v * 100.0f);
+        if (iv < 0) iv = 0; if (iv > 100) iv = 100;
+        char buf[8];
+        snprintf(buf, sizeof(buf), "v%03d", iv);
+        fStream->println(buf);
     }
 
-    // Backend: DFPlayer Mini (flat root index 1..2999)
-    inline void sendDFPlayerPlayFlat(uint16_t track) {
-        if (track < 1) track = 1;
-        fDFMini.play(track);
+    // ---- DFPlayer helpers ----------------------------------------------------
+    inline void sendDFPlayerPlayFlat(uint16_t flat) {
+        // DFPlayer's folder/track addressing is different, but supports playNum
+        fDF.play(flat);
     }
 
-    // Backend: DY-SV5W (DY-V5W protocol – play track N)
-    // Common "Play Index" frame: 7E 03 A2 <hi> <lo> EF
-    inline void sendDYSV5WPlay(uint16_t track) {
-        if (!fStream || track < 1) return;
-        uint8_t hi = (track >> 8) & 0xFF;
-        uint8_t lo = track & 0xFF;
-        const uint8_t cmd[6] = {0x7E, 0x03, 0xA2, hi, lo, 0xEF};
-        fStream->write(cmd, sizeof(cmd));
+    // ---- DY-SV5W helpers -----------------------------------------------------
+    inline void sendDYSV5WPlay(uint16_t flat) {
+        // DY-SV5W binary: 7E 03 A2 <hi> <lo> EF (Play index)
+        if (!fStream) return;
+        if (flat < 1) flat = 1; if (flat > 255) flat = 255;
+        uint8_t hi = (flat >> 8) & 0xFF;
+        uint8_t lo = flat & 0xFF;
+        const uint8_t frame[6] = {0x7E, 0x03, 0xA2, hi, lo, 0xEF};
+        fStream->write(frame, sizeof(frame));
     }
-
-    // Backend: HCR send
-    inline void sendHCR(const char* s) {
-        if (fStream) fStream->print(s);
+    inline void sendDYSV5W(const char* s) {
+        // Best-effort ASCII support for volume and misc; keep minimal
+        if (!fStream || !s) return;
+        fStream->print(s);
+        fStream->write('\r'); fStream->write('\n');
     }
 };

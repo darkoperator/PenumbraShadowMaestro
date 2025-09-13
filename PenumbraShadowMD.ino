@@ -146,9 +146,12 @@ int time360DomeTurn = DEFAULT_AUTO_DOME_TURN_TIME;
 
 // #define SHADOW_DEBUG(...) printf(__VA_ARGS__);
 #define SHADOW_VERBOSE(...) printf(__VA_ARGS__);
-#include "ShadowSound.h"
-SDSound sShadowSound;
 #ifdef USE_PREFERENCES
+#include "Debug.h"
+#include "pin-map.h"
+#include "ShadowSound.h"
+#include "BoardInit.h"
+SDSound sShadowSound;
 #include <Preferences.h>
 #define PREFERENCE_PS3_FOOT_MAC             "ps3footmac"
 #define PREFERENCE_PS3_DOME_MAC             "ps3domemac"
@@ -208,6 +211,13 @@ public:
     {
         for (ShadowButtonAction* btn = *head(); btn != NULL; btn = btn->fNext)
             printf("%s: %s\n", btn->name().c_str(), btn->action().c_str());
+    }
+
+    // Export actions as re-applicable commands
+    static void dumpActions()
+    {
+        for (ShadowButtonAction* btn = *head(); btn != NULL; btn = btn->fNext)
+            printf("#SMSET %s %s\n", btn->name().c_str(), btn->action().c_str());
     }
 
     void reset()
@@ -356,11 +366,11 @@ int maestroBaudRate = DEFAULT_MAESTRO_BAUD;
 #include <motor/CytronSmartDriveDuoDriver.h>
 #endif
 
-#include "pin-map.h"
 
 #define CONSOLE_BUFFER_SIZE     300
 static unsigned sPos;
 static char sBuffer[CONSOLE_BUFFER_SIZE];
+static bool sLastWasCR = false;
 
 //---------------------------------------------------------------------------------------
 //                          Command Parsing Helpers
@@ -730,6 +740,12 @@ bool handleMaestroAction(const char* action)
 // =======================================================================================
 void setup()
 {
+    DEBUG_BEGIN();
+    DEBUG_PRINTLN("\nBooting...");
+    randomSeed(esp_random());
+    Board::initGPIO();
+    Board::setOutputsEnabled(false);
+
     REELTWO_READY();
 
 #ifdef USE_PREFERENCES
@@ -894,12 +910,41 @@ void sendBodyMarcCommand(const char* cmd)
     BODY_MAESTRO_SERIAL.print(cmd); BODY_MAESTRO_SERIAL.print("\r");
 }
 
+static bool handleSMPLAY(const char* s) {
+  if (!s) return false;
+
+  // Skip any leading whitespace after "#SMPLAY"
+  while (*s && isspace((unsigned char)*s)) ++s;
+
+  // If the number is glued (e.g., "3" from "#SMPLAY3"), or after a space ("#SMPLAY 3")
+  // Move s to the first digit
+  while (*s && !isdigit((unsigned char)*s)) ++s;
+
+  if (!isdigit((unsigned char)*s)) {
+    DEBUG_PRINTLN("SMPLAY: Missing track number");
+    return false;
+  }
+
+  long n = strtol(s, nullptr, 10);
+  if (n < 1) n = 1;
+  if (n > 255) n = 255;
+
+  DEBUG_PRINTLN("[SMPLAY] parsed track:");
+  DEBUG_PRINTLN(n);
+
+  sShadowSound.stopRandom();     // ensure random isn’t fighting you
+  sShadowSound.playTrack((uint16_t)n);
+  // If you want an echo like your current UI:
+  // printf("Played track: %ld\n", n);
+  return true;
+}
 // ------- SM console help -------
 static void printSMHelp()
 {
     printf("\nPenumbra / Maestro Console Commands\n");
     printf("-----------------------------------\n");
     printf("#SMHELP                    : Show this help.\n");
+    printf("#SMDUMP                    : Print commands to restore current configuration.\n");
     printf("#SMZERO                    : Clear ALL preferences (factory reset) and reboot.\n");
     printf("#SMRESTART                 : Reboot the controller.\n");
     printf("#SMLIST                    : List all button actions.\n");
@@ -917,7 +962,7 @@ static void printSMHelp()
     printf("#SMSOUND0                  : Sound Disabled\n");
     printf("#SMSOUND1                  : Sound = MP3 Trigger (38400 baud)\n");
     printf("#SMSOUND2                  : Sound = DFPlayer Mini (9600 baud)\n");
-    printf("#SMSOUND3                  : Sound = DY-SV5W / HCR (9600 baud)\n");
+    printf("#SMSOUND3                  : Sound = DY-SV5W (9600 baud)\n");
     printf("#SMVOLUME <0..1000>        : Sound volume (0=muted .. 1000=max)\n");
     printf("#SMSTARTUP <track|-1>      : Startup sound (track number) or -1 to disable\n");
     printf("#SMRAND0                   : Disable random sounds\n");
@@ -939,11 +984,15 @@ static void printSMHelp()
     printf("#SMMARCBAUD <baud>         : Maestro serial baud (needs reboot)\n");
     printf("#SMMOTORBAUD <baud>        : Motor controller baud (needs reboot)\n");
     printf("\n");
-    printf("Tips:\n");
-    printf(" - Use #SMLIST to see current trigger bindings.\n");
-    printf(" - Example bindings:  #SMSET FTbtnUP_MD \"DM58;S3\"   (dome seq 58 + track 3)\n");
-    printf("                      #SMSET btnRight_MD \"S f\"      (sound cmd $F: volume max)\n");
-    printf("                      #SMSET FTbtnUP_CROSS_MD \"S R\" (start random)\n");
+    printf("Examples:\n");
+    printf(" - Bind button to Dome sequence:         #SMSET FTbtnUP_MD \"DM58\"\n");
+    printf(" - Bind button to Body sequence:         #SMSET btnUP_MD    \"BM2\"\n");
+    printf(" - Run sequence + track on press:        #SMSET FTbtnUP_MD \"DM58;S3\"\n");
+    printf(" - Play only a track on press:           #SMSET btnRight_MD \"S 42\"\n");
+    printf(" - Play a track immediately:             #SMPLAY 42\n");
+    printf(" - One-shot random in range:             #SMPLAYRAND 10 25\n");
+    printf(" - Persistent random range + enable:     #SMRANDTRACKS 10 25   (then #SMRAND1)\n");
+    printf(" - List all trigger names to bind:       #SMLIST\n");
     printf("\n");
 }
 
@@ -960,6 +1009,485 @@ void reboot()
 // =======================================================================================
 //           Main Program Loop - This is the recurring check loop for entire sketch
 // =======================================================================================
+
+// Route a single token that begins with '#'.
+static void routeOne(char* line)
+{
+    char* cmd = line;
+
+    // ---------- Command chain begins ----------
+    if (matchCmd(cmd, "#SMHELP"))
+    {
+        printSMHelp();
+    }
+    if (matchCmd(cmd, "#SMZERO"))
+    {
+        preferences.clear();
+        DEBUG_PRINT("Clearing preferences. ");
+        reboot();
+    }
+    CMD("#SMRESTART")
+    {
+        reboot();
+    }
+    CMD("#SMLIST")
+    {
+        printf("Button Actions\n");
+        printf("-----------------------------------\n");
+        ShadowButtonAction::listActions();
+    }
+    CMD("#SMDEL")
+    {
+        String key(cmd); key.trim();
+        ShadowButtonAction* btn = ShadowButtonAction::findAction(key);
+        if (btn) {
+            btn->reset();
+            printf("Trigger: %s reset to default %s\n", btn->name().c_str(), btn->action().c_str());
+        } else {
+            printf("Trigger Not Found: %s\n", key.c_str());
+        }
+    }
+    CMD("#SMVOLUME")
+    {
+        uint32_t val;
+        if (parseUIntInRange(cmd, val, 0, 1000, "Usage: #SMVOLUME <0..1000>")) {
+            preferences.putInt(PREFERENCE_SHADOWSOUND_VOLUME, (int)val);
+            sShadowSound.setVolume(val / 1000.0f);
+            printf("Sound Volume: %u (%.0f%%)\n", val, val / 10.0f);
+        }
+    }
+    CMD("#SMSOUND")
+    {
+        long choice;
+        if (!parseLongArg(cmd, choice)) {
+            printf("Usage: #SMSOUND0 | #SMSOUND1 | #SMSOUND2 | #SMSOUND3\n");
+        } else {
+            SDSound::Module mod  = SDSound::fromChoice((int)choice);
+            uint32_t        baud = SDSound::baudFor(mod);
+
+            preferences.putInt(PREFERENCE_SHADOWSOUND, (int)mod);
+
+            sShadowSound.end();
+            SOUND_SERIAL.end();
+            if (baud) {
+                SOUND_SERIAL_INIT(baud);
+                int startup = preferences.getInt(PREFERENCE_SHADOWSOUND_STARTUP, SHADOW_SOUND_STARTUP);
+                if (!sShadowSound.begin(mod, SOUND_SERIAL, startup)) {
+                    printf("FAILED TO INITIALIZE SOUND MODULE: %s (baud=%lu)\n",
+                           SDSound::moduleName(mod), (unsigned long)baud);
+                } else {
+                    int volPref = preferences.getInt(PREFERENCE_SHADOWSOUND_VOLUME, 700);
+                    if (volPref < 50) volPref = 700;
+                    sShadowSound.setVolume(volPref / 1000.0f);
+                    sShadowSound.setRandomMin(preferences.getInt(PREFERENCE_SHADOWSOUND_RANDOM_MIN, SHADOW_SOUND_RANDOM_MIN));
+                    sShadowSound.setRandomMax(preferences.getInt(PREFERENCE_SHADOWSOUND_RANDOM_MAX, SHADOW_SOUND_RANDOM_MAX));
+                    if (preferences.getBool(PREFERENCE_SHADOWSOUND_RANDOM, SHADOW_SOUND_RANDOM))
+                        sShadowSound.startRandomInSeconds(13);
+                }
+            } else {
+                printf("Sound Disabled.\n");
+            }
+            printf("Sound module set to: %s (%lu baud)\n",
+                   SDSound::moduleName(mod), (unsigned long)baud);
+        }
+    }
+    CMD("#SMCONFIG")
+    {
+        // Aliases (same as in setup)
+        const char* PREF_SOUND_MODULE             = PREFERENCE_SHADOWSOUND;
+        const char* PREF_SOUND_VOLUME             = PREFERENCE_SHADOWSOUND_VOLUME;
+        const char* PREF_SOUND_STARTUP            = PREFERENCE_SHADOWSOUND_STARTUP;
+        const char* PREF_SOUND_RANDOM_MIN_MS      = PREFERENCE_SHADOWSOUND_RANDOM_MIN;
+        const char* PREF_SOUND_RANDOM_MAX_MS      = PREFERENCE_SHADOWSOUND_RANDOM_MAX;
+        const char* PREF_SOUND_RANDOM_ENABLED     = PREFERENCE_SHADOWSOUND_RANDOM;
+
+        SDSound::Module smod = (SDSound::Module)preferences.getInt(PREF_SOUND_MODULE, SHADOW_SOUND_PLAYER);
+        int  vol   = preferences.getInt(PREF_SOUND_VOLUME,   SHADOW_SOUND_VOLUME);
+        int  start = preferences.getInt(PREF_SOUND_STARTUP,  SHADOW_SOUND_STARTUP);
+        bool rnd   = preferences.getBool(PREF_SOUND_RANDOM_ENABLED, SHADOW_SOUND_RANDOM);
+        int  rmin  = preferences.getInt(PREF_SOUND_RANDOM_MIN_MS,   SHADOW_SOUND_RANDOM_MIN);
+        int  rmax  = preferences.getInt(PREF_SOUND_RANDOM_MAX_MS,   SHADOW_SOUND_RANDOM_MAX);
+        uint16_t rtlo, rthi; sShadowSound.getRandomTracks(rtlo, rthi);
+
+        printf("Configuration\n");
+        printf("-----------------------------------\n");
+        // Sound
+        printf("Sound Module:        %s   (#SMSOUND0/1/2/3)\n", SDSound::moduleName(smod));
+        printf("Sound Volume:        %4d (#SMVOLUME)         [0..1000]\n", vol);
+        printf("Startup Sound:       %4d (#SMSTARTUP)        [-1 disable | track]\n", start);
+        printf("Random Enabled:      %4d (#SMRAND0/#SMRAND1) [0/1]\n", rnd ? 1 : 0);
+        printf("Random Min Delay:    %4d (#SMRANDMIN)        [ms]\n", rmin);
+        printf("Random Max Delay:    %4d (#SMRANDMAX)        [ms]\n", rmax);
+        printf("Random Track Range:  %3u..%3u (#SMRANDTRACKS <min> <max>)\n", rtlo, rthi);
+
+        // Drive / Dome
+        printf("Drive Speed Normal:  %3d (#SMNORMALSPEED)    [0..127]\n", drivespeed1);
+        printf("Drive Speed Max:     %3d (#SMMAXSPEED)       [0..127]\n", drivespeed2);
+        printf("Turn Speed:          %3d (#SMTURNSPEED)      [0..127]\n", turnspeed);
+        printf("Dome Speed:          %3d (#SMDOMESPEED)      [0..127]\n", domespeed);
+        printf("Ramping:             %3d (#SMRAMPING)        [0..10]\n", ramping);
+        printf("Foot Stick Deadband: %3d (#SMFOOTDB)         [0..127]\n", joystickFootDeadZoneRange);
+        printf("Dome Stick Deadband: %3d (#SMDOMEDB)         [0..127]\n", joystickDomeDeadZoneRange);
+        printf("Drive Deadband:      %3d (#SMDRIVEDB)        [0..127]\n", driveDeadBandRange);
+        printf("Invert Turn:         %3d (#SMINVERT)         [0..1]\n",  invertTurnDirection);
+        printf("Dome Auto Speed:     %3d (#SMAUTOSPEED)      [50..100]\n", domeAutoSpeed);
+        printf("Dome Auto Time:     %4d (#SMAUTOTIME)       [2000..8000 ms]\n", time360DomeTurn);
+
+        // Serial
+        printf("Maestro Baud:     %6d (#SMMARCBAUD)\n",  maestroBaudRate);
+        printf("Motor Baud:       %6d (#SMMOTORBAUD)\n", motorControllerBaudRate);
+
+        // NeoPixels
+        printf("NeoPixels Enabled:   %3d (#SMNEOON/#SMNEOOFF)\n", neopixelEnabled ? 1 : 0);
+        printf("NeoPixel Count:      %3d (#SMNEOCOUNT)\n", neopixelCount);
+        printf("NeoPixel Color:   R=%3d G=%3d B=%3d (#SMNEOCOLOR <r> <g> <b>)\n",
+               neopixelR, neopixelG, neopixelB);
+    }
+    CMD("#SMDUMP")
+    {
+        // Emit a list of commands that can recreate the current configuration.
+        printf("# ---- Config dump: paste to restore ----\n");
+        const char* PREF_SOUND_MODULE         = PREFERENCE_SHADOWSOUND;
+        const char* PREF_SOUND_VOLUME         = PREFERENCE_SHADOWSOUND_VOLUME;
+        const char* PREF_SOUND_STARTUP        = PREFERENCE_SHADOWSOUND_STARTUP;
+        const char* PREF_SOUND_RANDOM_MIN_MS  = PREFERENCE_SHADOWSOUND_RANDOM_MIN;
+        const char* PREF_SOUND_RANDOM_MAX_MS  = PREFERENCE_SHADOWSOUND_RANDOM_MAX;
+        const char* PREF_SOUND_RANDOM_ENABLED = PREFERENCE_SHADOWSOUND_RANDOM;
+
+        SDSound::Module smod = (SDSound::Module)preferences.getInt(PREF_SOUND_MODULE, SHADOW_SOUND_PLAYER);
+        int  vol   = preferences.getInt(PREF_SOUND_VOLUME,   SHADOW_SOUND_VOLUME);
+        int  start = preferences.getInt(PREF_SOUND_STARTUP,  SHADOW_SOUND_STARTUP);
+        bool rnd   = preferences.getBool(PREF_SOUND_RANDOM_ENABLED, SHADOW_SOUND_RANDOM);
+        int  rmin  = preferences.getInt(PREF_SOUND_RANDOM_MIN_MS,   SHADOW_SOUND_RANDOM_MIN);
+        int  rmax  = preferences.getInt(PREF_SOUND_RANDOM_MAX_MS,   SHADOW_SOUND_RANDOM_MAX);
+        uint16_t rtlo, rthi; sShadowSound.getRandomTracks(rtlo, rthi);
+
+        printf("#SMSOUND%u\n", (unsigned)smod);
+        printf("#SMVOLUME %d\n", vol);
+        printf("#SMSTARTUP %d\n", start);
+        printf("#SMRANDMIN %d\n", rmin);
+        printf("#SMRANDMAX %d\n", rmax);
+        printf(rnd ? "#SMRAND1\n" : "#SMRAND0\n");
+        printf("#SMRANDTRACKS %u %u\n", (unsigned)rtlo, (unsigned)rthi);
+
+        printf("#SMNORMALSPEED %u\n", (unsigned)drivespeed1);
+        printf("#SMMAXSPEED %u\n", (unsigned)drivespeed2);
+        printf("#SMTURNSPEED %u\n", (unsigned)turnspeed);
+        printf("#SMDOMESPEED %u\n", (unsigned)domespeed);
+        printf("#SMRAMPING %u\n", (unsigned)ramping);
+        printf("#SMFOOTDB %u\n", (unsigned)joystickFootDeadZoneRange);
+        printf("#SMDOMEDB %u\n", (unsigned)joystickDomeDeadZoneRange);
+        printf("#SMDRIVEDB %u\n", (unsigned)driveDeadBandRange);
+        printf("#SMINVERT %u\n", invertTurnDirection ? 1u : 0u);
+        printf("#SMAUTOSPEED %u\n", (unsigned)domeAutoSpeed);
+        printf("#SMAUTOTIME %u\n", (unsigned)time360DomeTurn);
+
+        printf("#SMMARCBAUD %d\n", maestroBaudRate);
+        printf("#SMMOTORBAUD %d\n", motorControllerBaudRate);
+
+        printf(neopixelEnabled ? "#SMNEOON\n" : "#SMNEOOFF\n");
+        printf("#SMNEOCOUNT %d\n", neopixelCount);
+        printf("#SMNEOCOLOR %u %u %u\n", (unsigned)neopixelR, (unsigned)neopixelG, (unsigned)neopixelB);
+
+        // Dump triggers as SMSET commands
+        ShadowButtonAction::dumpActions();
+        printf("# ---- End of config dump ----\n");
+    }
+    CMD("#SMSTARTUP")
+    {
+        long v;
+        if (parseLongArg(cmd, v)) {
+            preferences.putInt(PREFERENCE_SHADOWSOUND_STARTUP, (int)v);
+            printf("Startup Sound: %ld\n", v);
+        } else {
+            printf("Usage: #SMSTARTUP <track|-1>\n");
+        }
+    }
+    CMD("#SMRANDMIN")
+    {
+        uint32_t v;
+        if (parseUIntInRange(cmd, v, 0, 60000, "Usage: #SMRANDMIN <ms>")) {
+            preferences.putInt(PREFERENCE_SHADOWSOUND_RANDOM_MIN, (int)v);
+            sShadowSound.setRandomMin(v);
+            printf("Random Min: %u\n", v);
+        }
+    }
+    CMD("#SMRANDMAX")
+    {
+        uint32_t v;
+        if (parseUIntInRange(cmd, v, 0, 60000, "Usage: #SMRANDMAX <ms>")) {
+            preferences.putInt(PREFERENCE_SHADOWSOUND_RANDOM_MAX, (int)v);
+            sShadowSound.setRandomMax(v);
+            printf("Random Max: %u\n", v);
+        }
+    }
+    CMD("#SMRAND0")
+    {
+        preferences.putInt(PREFERENCE_SHADOWSOUND_RANDOM, false);
+        sShadowSound.stopRandom();
+        printf("Random Disabled.\n");
+    }
+    CMD("#SMRAND1")
+    {
+        preferences.putBool(PREFERENCE_SHADOWSOUND_RANDOM, true);
+        sShadowSound.startRandom();
+        printf("Random Enabled.\n");
+    }
+    CMD("#SMNORMALSPEED")
+    {
+        uint32_t v;
+        if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMNORMALSPEED <0..127>")) {}
+        else if (v == (uint32_t)drivespeed1) printf("Unchanged.\n");
+        else { drivespeed1 = v; preferences.putInt(PREFERENCE_SPEED_NORMAL, drivespeed1); printf("Normal Speed Changed.\n"); }
+    }
+    CMD("#SMMAXSPEED")
+    {
+        uint32_t v;
+        if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMMAXSPEED <0..127>")) {}
+        else if (v == (uint32_t)drivespeed2) printf("Unchanged.\n");
+        else { drivespeed2 = v; preferences.putInt(PREFERENCE_SPEED_OVER_THROTTLE, drivespeed2); printf("Max Speed Changed.\n"); }
+    }
+    CMD("#SMTURNSPEED")
+    {
+        uint32_t v;
+        if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMTURNSPEED <0..127>")) {}
+        else if (v == (uint32_t)turnspeed) printf("Unchanged.\n");
+        else { turnspeed = v; preferences.putInt(PREFERENCE_TURN_SPEED, turnspeed); printf("Turn Speed Changed.\n"); }
+    }
+    CMD("#SMDOMESPEED")
+    {
+        uint32_t v;
+        if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMDOMESPEED <0..127>")) {}
+        else if (v == (uint32_t)domespeed) printf("Unchanged.\n");
+        else { domespeed = v; preferences.putInt(PREFERENCE_DOME_SPEED, v); printf("Dome Speed Changed.\n"); }
+    }
+    CMD("#SMRAMPING")
+    {
+        uint32_t v;
+        if (!parseUIntInRange(cmd, v, 0, 10, "Usage: #SMRAMPING <0..10>")) {}
+        else if (v == (uint32_t)ramping) printf("Unchanged.\n");
+        else { ramping = v; preferences.putInt(PREFERENCE_RAMPING, ramping); printf("Ramping Changed.\n"); }
+    }
+    CMD("#SMFOOTDB")
+    {
+        uint32_t v;
+        if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMFOOTDB <0..127>")) {}
+        else if (v == (uint32_t)joystickFootDeadZoneRange) printf("Unchanged.\n");
+        else { joystickFootDeadZoneRange = v; preferences.putInt(PREFERENCE_FOOTSTICK_DEADBAND, joystickFootDeadZoneRange); printf("Foot Joystick Deadband Changed.\n"); }
+    }
+    CMD("#SMDOMEDB")
+    {
+        uint32_t v;
+        if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMDOMEDB <0..127>")) {}
+        else if (v == (uint32_t)joystickDomeDeadZoneRange) printf("Unchanged.\n");
+        else { joystickDomeDeadZoneRange = v; preferences.putInt(PREFERENCE_DOMESTICK_DEADBAND, joystickDomeDeadZoneRange); printf("Dome Joystick Deadband Changed.\n"); }
+    }
+    CMD("#SMDRIVEDB")
+    {
+        uint32_t v;
+        if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMDRIVEDB <0..127>")) {}
+        else if (v == (uint32_t)driveDeadBandRange) printf("Unchanged.\n");
+        else { driveDeadBandRange = v; preferences.putInt(PREFERENCE_DRIVE_DEADBAND, driveDeadBandRange); printf("Drive Controller Deadband Changed.\n"); }
+    }
+    CMD("#SMINVERT")
+    {
+        long v;
+        if (!parseLongArg(cmd, v)) { printf("Usage: #SMINVERT <0|1>\n"); }
+        else if ((bool)v == invertTurnDirection) printf("Unchanged.\n");
+        else { invertTurnDirection = (bool)v; preferences.putInt(PREFERENCE_INVERT_TURN_DIRECTION, invertTurnDirection);
+            printf("Invert Turn Direction %s.\n", invertTurnDirection ? "Enabled" : "Disabled"); }
+    }
+    CMD("#SMAUTOSPEED")
+    {
+        uint32_t v;
+        if (!parseUIntInRange(cmd, v, 50, 100, "Usage: #SMAUTOSPEED <50..100>")) {}
+        else if (v == (uint32_t)domeAutoSpeed) printf("Unchanged.\n");
+        else { domeAutoSpeed = v; preferences.putInt(PREFERENCE_DOME_AUTO_SPEED, domeAutoSpeed); printf("Auto Dome Speed Changed.\n"); }
+    }
+    CMD("#SMAUTOTIME")
+    {
+        uint32_t v;
+        if (!parseUIntInRange(cmd, v, 0, 8000, "Usage: #SMAUTOTIME <0..8000>")) {}
+        else if (v == (uint32_t)time360DomeTurn) printf("Unchanged.\n");
+        else { time360DomeTurn = v; preferences.putInt(PREFERENCE_DOME_DOME_TURN_TIME, time360DomeTurn); printf("Auto Dome Turn Time Changed.\n"); }
+    }
+    CMD("#SMMOTORBAUD")
+    {
+        long v;
+        if (parseLongArg(cmd, v)) {
+            if (v == motorControllerBaudRate) printf("Unchanged.\n");
+            else { motorControllerBaudRate = (int)v; preferences.putInt(PREFERENCE_MOTOR_BAUD, motorControllerBaudRate);
+                printf("Motor Controller Serial Baud Rate Changed. Needs Reboot.\n"); }
+        } else printf("Usage: #SMMOTORBAUD <baud>\n");
+    }
+    CMD("#SMMARCBAUD")
+    {
+        long v;
+        if (parseLongArg(cmd, v)) {
+            if (v == maestroBaudRate) printf("Unchanged.\n");
+            else { maestroBaudRate = (int)v; preferences.putInt(PREFERENCE_MAESTRO_BAUD, maestroBaudRate);
+                printf("Maestro Serial Baud Rate Changed. Needs Reboot.\n"); }
+        } else printf("Usage: #SMMARCBAUD <baud>\n");
+    }
+    CMD("#SMPLAY")
+    {
+        // ---- debug: show what we actually received at this point
+        static unsigned long smplay_seq = 0;
+        ++smplay_seq;
+        printf("[SMPLAY %lu] raw after token: \"%s\"\n", smplay_seq, cmd);
+
+        // Accept "#SMPLAY 3" or "#SMPLAY3"
+        _skip_ws(cmd);
+
+        if (isdigit((unsigned char)*cmd)) {
+            char* endp = nullptr;
+            long v = strtol(cmd, &endp, 10);
+            if (endp == cmd) {
+                printf("Usage: #SMPLAY <1..255 | TriggerName>\n");
+                return;
+            }
+            if (v < 1)   v = 1;
+            if (v > 255) v = 255;
+
+            const uint16_t track = (uint16_t)v;
+
+            // ---- debug: show exactly what we parsed
+            printf("[SMPLAY %lu] parsed: %u\n", smplay_seq, (unsigned)track);
+
+            // Don’t let random override an explicit play
+            sShadowSound.stopRandom();
+
+            // Play exactly what we parsed
+            sShadowSound.playTrack(track);
+
+            // Echo exactly what we sent (single source of truth)
+            printf("Played track: %u\n", (unsigned)track);
+
+            // Advance past the number so the same chars aren't re-consumed
+            cmd = endp;
+            _skip_ws(cmd);
+            return;
+        }
+
+        // Otherwise, treat argument as a trigger name
+        String key(cmd);
+        key.trim();
+        ShadowButtonAction* btn = ShadowButtonAction::findAction(key);
+        if (btn) {
+            btn->trigger();
+            printf("Triggered: %s\n", key.c_str());
+        } else {
+            printf("Unknown: %s\n", key.c_str());
+        }
+        return;
+    }
+    CMD("#SMSET")
+    {
+        _skip_ws(cmd);
+        char* keyp = cmd;
+        char* valp = strchr(cmd, ' ');
+        if (valp) {
+            *valp++ = '\0';
+            String key(keyp); key.trim();
+            ShadowButtonAction* btn = ShadowButtonAction::findAction(key);
+            if (btn) {
+                String action(valp); action.trim();
+                btn->setAction(action);
+                printf("Trigger: %s set to %s\n", key.c_str(), action.c_str());
+            } else {
+                printf("Trigger Not Found: %s\n", key.c_str());
+            }
+        } else {
+            printf("Usage: #SMSET <TriggerName> <Action>\n");
+        }
+    }
+    CMD("#SMNEOON")
+    {
+        neopixelEnabled = true;
+        preferences.putBool("neoenable", true);
+        refreshNeoPixels();
+        printf("NeoPixels Enabled.\n");
+    }
+    CMD("#SMNEOOFF")
+    {
+        neopixelEnabled = false;
+        preferences.putBool("neoenable", false);
+        refreshNeoPixels();
+        printf("NeoPixels Disabled.\n");
+    }
+    CMD("#SMNEOCOUNT")
+    {
+        uint32_t v;
+        if (parseUIntInRange(cmd, v, 0, 300, "Usage: #SMNEOCOUNT <count>")) {
+            neopixelCount = v;
+            preferences.putInt("neocount", neopixelCount);
+            initNeoPixels(neopixelCount);
+            refreshNeoPixels();
+            printf("NeoPixel count set to %u\n", v);
+        }
+    }
+    CMD("#SMNEOCOLOR")
+    {
+        long r, g, b;
+        if (!parseLongArg(cmd, r)) { printf("Usage: #SMNEOCOLOR <R> <G> <B>\n"); }
+        else if (!parseLongArg(cmd, g)) { printf("Usage: #SMNEOCOLOR <R> <G> <B>\n"); }
+        else if (!parseLongArg(cmd, b)) { printf("Usage: #SMNEOCOLOR <R> <G> <B>\n"); }
+        else {
+            if (r < 0) r = 0; if (r > 255) r = 255;
+            if (g < 0) g = 0; if (g > 255) g = 255;
+            if (b < 0) b = 0; if (b > 255) b = 255;
+
+            neopixelR = r; neopixelG = g; neopixelB = b;
+            preferences.putInt("neor", neopixelR);
+            preferences.putInt("neog", neopixelG);
+            preferences.putInt("neob", neopixelB);
+            refreshNeoPixels();
+            printf("NeoPixel color set to R=%ld G=%ld B=%ld\n", r, g, b);
+        }
+    }
+    // ---- One-shot random play in a range ----
+    CMD("#SMPLAYRAND")
+    {
+        long lo, hi;
+        if (!parseLongArg(cmd, lo)) {
+            printf("Usage: #SMPLAYRAND <min> [max]\n");
+        } else {
+            if (!parseLongArg(cmd, hi)) hi = lo;
+            if (lo < 1) lo = 1;
+            if (hi < 1) hi = 1;
+            if (lo > 255) lo = 255;
+            if (hi > 255) hi = 255;
+            if (hi < lo) { long t = lo; lo = hi; hi = t; }
+            sShadowSound.playRandomTrack((uint16_t)lo, (uint16_t)hi);
+            printf("Random track %ld–%ld triggered\n", lo, hi);
+        }
+    }
+    // ---- Persistent random track range (single definition) ----
+    CMD("#SMRANDTRACKS")
+    {
+        long lo, hi;
+        if (!parseLongArg(cmd, lo) || !parseLongArg(cmd, hi)) {
+            printf("Usage: #SMRANDTRACKS <min> <max>\n");
+        } else {
+            if (lo < 1) lo = 1;
+            if (hi < 1) hi = 1;
+            if (lo > 255) lo = 255;
+            if (hi > 255) hi = 255;
+            if (hi < lo) { long t = lo; lo = hi; hi = t; }
+            sShadowSound.setRandomTracks((uint16_t)lo, (uint16_t)hi);
+            preferences.putInt("sm_rand_lo", (int)lo);
+            preferences.putInt("sm_rand_hi", (int)hi);
+            printf("Random track range set to %ld–%ld\n", lo, hi);
+        }
+    }
+    // ---------- End of command chain ----------
+    else
+    {
+        printf("Unknown command: %s\n", line);
+        printf("Valid commands:\n");
+        printSMHelp();
+    }
+}
 
 void loop()
 {
@@ -982,419 +1510,73 @@ void loop()
        autoDome(); 
     }
 
-   if (Serial.available())
-{
-    int ch = Serial.read();
+   // New serial input handling (CRLF-safe, tokenized)
+   while (Serial.available())
+   {
+       int ch = Serial.read();
+       if (ch < 0) break;
 
-    if (ch == 0x0A || ch == 0x0D)
-    {
-        char* cmd = sBuffer;
-
-        // ---------- Command chain begins ----------
-        if (matchCmd(cmd, "#SMZERO"))
+       // Handle CR/LF with CRLF swallow
+        if (ch == '\r' || ch == '\n')
         {
-            preferences.clear();
-            DEBUG_PRINT("Clearing preferences. ");
-            reboot();
-        }
-        CMD("#SMRESTART")
-        {
-            reboot();
-        }
-        CMD("#SMLIST")
-        {
-            printf("Button Actions\n");
-            printf("-----------------------------------\n");
-            ShadowButtonAction::listActions();
-        }
-        CMD("#SMDEL")
-        {
-            String key(cmd); key.trim();
-            ShadowButtonAction* btn = ShadowButtonAction::findAction(key);
-            if (btn) {
-                btn->reset();
-                printf("Trigger: %s reset to default %s\n", btn->name().c_str(), btn->action().c_str());
-            } else {
-                printf("Trigger Not Found: %s\n", key.c_str());
+            if (ch == '\n' && sLastWasCR)
+            {
+                sLastWasCR = false;
+                continue; // swallow LF of CRLF pair
             }
-        }
-        CMD("#SMVOLUME")
-        {
-            uint32_t val;
-            if (parseUIntInRange(cmd, val, 0, 1000, "Usage: #SMVOLUME <0..1000>")) {
-                preferences.putInt(PREFERENCE_SHADOWSOUND_VOLUME, (int)val);
-                sShadowSound.setVolume(val / 1000.0f);
-                printf("Sound Volume: %u (%.0f%%)\n", val, val / 10.0f);
-            }
-        }
-        CMD("#SMSOUND")
-        {
-            long choice;
-            if (!parseLongArg(cmd, choice)) {
-                printf("Usage: #SMSOUND0 | #SMSOUND1 | #SMSOUND2 | #SMSOUND3\n");
-            } else {
-                SDSound::Module mod  = SDSound::fromChoice((int)choice);
-                uint32_t        baud = SDSound::baudFor(mod);
+            sLastWasCR = (ch == '\r');
 
-                preferences.putInt(PREFERENCE_SHADOWSOUND, (int)mod);
+            // Null-terminate and route tokens on this line
+            sBuffer[sPos] = '\0';
 
-                sShadowSound.end();
-                SOUND_SERIAL.end();
-                if (baud) {
-                    SOUND_SERIAL_INIT(baud);
-                    int startup = preferences.getInt(PREFERENCE_SHADOWSOUND_STARTUP, SHADOW_SOUND_STARTUP);
-                    if (!sShadowSound.begin(mod, SOUND_SERIAL, startup)) {
-                        printf("FAILED TO INITIALIZE SOUND MODULE: %s (baud=%lu)\n",
-                               SDSound::moduleName(mod), (unsigned long)baud);
-                    } else {
-                        int volPref = preferences.getInt(PREFERENCE_SHADOWSOUND_VOLUME, 700);
-                        if (volPref < 50) volPref = 700;
-                        sShadowSound.setVolume(volPref / 1000.0f);
-                        sShadowSound.setRandomMin(preferences.getInt(PREFERENCE_SHADOWSOUND_RANDOM_MIN, SHADOW_SOUND_RANDOM_MIN));
-                        sShadowSound.setRandomMax(preferences.getInt(PREFERENCE_SHADOWSOUND_RANDOM_MAX, SHADOW_SOUND_RANDOM_MAX));
-                        if (preferences.getBool(PREFERENCE_SHADOWSOUND_RANDOM, SHADOW_SOUND_RANDOM))
-                            sShadowSound.startRandomInSeconds(13);
+            if (sPos > 0)
+            {
+                char* p = sBuffer;
+                while (*p)
+                {
+                    while (*p && *p != '#') ++p;       // find next token
+                    if (!*p) break;
+                    char* start = p;
+                    ++p;                                 // skip '#'
+                    while (*p && *p != '#') ++p;        // advance to next '#'
+                    char saved = *p;
+                    *p = '\0';                          // isolate token
+
+                    // trim spaces
+                    while (*start && isspace((unsigned char)*start)) ++start;
+                    char* end = start + strlen(start);
+                    while (end > start && isspace((unsigned char)end[-1])) --end;
+                    *end = '\0';
+
+                    if (*start)
+                    {
+                        routeOne(start);
                     }
-                } else {
-                    printf("Sound Disabled.\n");
-                }
-                printf("Sound module set to: %s (%lu baud)\n",
-                       SDSound::moduleName(mod), (unsigned long)baud);
-            }
-        }
-        CMD("#SMCONFIG")
-        {
-            // Aliases (same as in setup)
-            const char* PREF_SOUND_MODULE             = PREFERENCE_SHADOWSOUND;
-            const char* PREF_SOUND_VOLUME             = PREFERENCE_SHADOWSOUND_VOLUME;
-            const char* PREF_SOUND_STARTUP            = PREFERENCE_SHADOWSOUND_STARTUP;
-            const char* PREF_SOUND_RANDOM_MIN_MS      = PREFERENCE_SHADOWSOUND_RANDOM_MIN;
-            const char* PREF_SOUND_RANDOM_MAX_MS      = PREFERENCE_SHADOWSOUND_RANDOM_MAX;
-            const char* PREF_SOUND_RANDOM_ENABLED     = PREFERENCE_SHADOWSOUND_RANDOM;
 
-            SDSound::Module smod = (SDSound::Module)preferences.getInt(PREF_SOUND_MODULE, SHADOW_SOUND_PLAYER);
-            int  vol   = preferences.getInt(PREF_SOUND_VOLUME,   SHADOW_SOUND_VOLUME);
-            int  start = preferences.getInt(PREF_SOUND_STARTUP,  SHADOW_SOUND_STARTUP);
-            bool rnd   = preferences.getBool(PREF_SOUND_RANDOM_ENABLED, SHADOW_SOUND_RANDOM);
-            int  rmin  = preferences.getInt(PREF_SOUND_RANDOM_MIN_MS,   SHADOW_SOUND_RANDOM_MIN);
-            int  rmax  = preferences.getInt(PREF_SOUND_RANDOM_MAX_MS,   SHADOW_SOUND_RANDOM_MAX);
-            uint16_t rtlo, rthi; sShadowSound.getRandomTracks(rtlo, rthi);
-
-            printf("Configuration\n");
-            printf("-----------------------------------\n");
-            // Sound
-            printf("Sound Module:        %s   (#SMSOUND0/1/2/3)\n", SDSound::moduleName(smod));
-            printf("Sound Volume:        %4d (#SMVOLUME)         [0..1000]\n", vol);
-            printf("Startup Sound:       %4d (#SMSTARTUP)        [-1 disable | track]\n", start);
-            printf("Random Enabled:      %4d (#SMRAND0/#SMRAND1) [0/1]\n", rnd ? 1 : 0);
-            printf("Random Min Delay:    %4d (#SMRANDMIN)        [ms]\n", rmin);
-            printf("Random Max Delay:    %4d (#SMRANDMAX)        [ms]\n", rmax);
-            printf("Random Track Range:  %3u..%3u (#SMRANDTRACKS <min> <max>)\n", rtlo, rthi);
-
-            // Drive / Dome
-            printf("Drive Speed Normal:  %3d (#SMNORMALSPEED)    [0..127]\n", drivespeed1);
-            printf("Drive Speed Max:     %3d (#SMMAXSPEED)       [0..127]\n", drivespeed2);
-            printf("Turn Speed:          %3d (#SMTURNSPEED)      [0..127]\n", turnspeed);
-            printf("Dome Speed:          %3d (#SMDOMESPEED)      [0..127]\n", domespeed);
-            printf("Ramping:             %3d (#SMRAMPING)        [0..10]\n", ramping);
-            printf("Foot Stick Deadband: %3d (#SMFOOTDB)         [0..127]\n", joystickFootDeadZoneRange);
-            printf("Dome Stick Deadband: %3d (#SMDOMEDB)         [0..127]\n", joystickDomeDeadZoneRange);
-            printf("Drive Deadband:      %3d (#SMDRIVEDB)        [0..127]\n", driveDeadBandRange);
-            printf("Invert Turn:         %3d (#SMINVERT)         [0..1]\n",  invertTurnDirection);
-            printf("Dome Auto Speed:     %3d (#SMAUTOSPEED)      [50..100]\n", domeAutoSpeed);
-            printf("Dome Auto Time:     %4d (#SMAUTOTIME)       [2000..8000 ms]\n", time360DomeTurn);
-
-            // Serial
-            printf("Maestro Baud:     %6d (#SMMARCBAUD)\n",  maestroBaudRate);
-            printf("Motor Baud:       %6d (#SMMOTORBAUD)\n", motorControllerBaudRate);
-
-            // NeoPixels
-            printf("NeoPixels Enabled:   %3d (#SMNEOON/#SMNEOOFF)\n", neopixelEnabled ? 1 : 0);
-            printf("NeoPixel Count:      %3d (#SMNEOCOUNT)\n", neopixelCount);
-            printf("NeoPixel Color:   R=%3d G=%3d B=%3d (#SMNEOCOLOR <r> <g> <b>)\n",
-                neopixelR, neopixelG, neopixelB);
-        }
-        CMD("#SMSTARTUP")
-        {
-            long v;
-            if (parseLongArg(cmd, v)) {
-                preferences.putInt(PREFERENCE_SHADOWSOUND_STARTUP, (int)v);
-                printf("Startup Sound: %ld\n", v);
-            } else {
-                printf("Usage: #SMSTARTUP <track|-1>\n");
-            }
-        }
-        CMD("#SMRANDMIN")
-        {
-            uint32_t v;
-            if (parseUIntInRange(cmd, v, 0, 60000, "Usage: #SMRANDMIN <ms>")) {
-                preferences.putInt(PREFERENCE_SHADOWSOUND_RANDOM_MIN, (int)v);
-                sShadowSound.setRandomMin(v);
-                printf("Random Min: %u\n", v);
-            }
-        }
-        CMD("#SMRANDMAX")
-        {
-            uint32_t v;
-            if (parseUIntInRange(cmd, v, 0, 60000, "Usage: #SMRANDMAX <ms>")) {
-                preferences.putInt(PREFERENCE_SHADOWSOUND_RANDOM_MAX, (int)v);
-                sShadowSound.setRandomMax(v);
-                printf("Random Max: %u\n", v);
-            }
-        }
-        CMD("#SMRAND0")
-        {
-            preferences.putInt(PREFERENCE_SHADOWSOUND_RANDOM, false);
-            sShadowSound.stopRandom();
-            printf("Random Disabled.\n");
-        }
-        CMD("#SMRAND1")
-        {
-            preferences.putBool(PREFERENCE_SHADOWSOUND_RANDOM, true);
-            sShadowSound.startRandom();
-            printf("Random Enabled.\n");
-        }
-        CMD("#SMNORMALSPEED")
-        {
-            uint32_t v;
-            if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMNORMALSPEED <0..127>")) {}
-            else if (v == (uint32_t)drivespeed1) printf("Unchanged.\n");
-            else { drivespeed1 = v; preferences.putInt(PREFERENCE_SPEED_NORMAL, drivespeed1); printf("Normal Speed Changed.\n"); }
-        }
-        CMD("#SMMAXSPEED")
-        {
-            uint32_t v;
-            if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMMAXSPEED <0..127>")) {}
-            else if (v == (uint32_t)drivespeed2) printf("Unchanged.\n");
-            else { drivespeed2 = v; preferences.putInt(PREFERENCE_SPEED_OVER_THROTTLE, drivespeed2); printf("Max Speed Changed.\n"); }
-        }
-        CMD("#SMTURNSPEED")
-        {
-            uint32_t v;
-            if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMTURNSPEED <0..127>")) {}
-            else if (v == (uint32_t)turnspeed) printf("Unchanged.\n");
-            else { turnspeed = v; preferences.putInt(PREFERENCE_TURN_SPEED, turnspeed); printf("Turn Speed Changed.\n"); }
-        }
-        CMD("#SMDOMESPEED")
-        {
-            uint32_t v;
-            if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMDOMESPEED <0..127>")) {}
-            else if (v == (uint32_t)domespeed) printf("Unchanged.\n");
-            else { domespeed = v; preferences.putInt(PREFERENCE_DOME_SPEED, v); printf("Dome Speed Changed.\n"); }
-        }
-        CMD("#SMRAMPING")
-        {
-            uint32_t v;
-            if (!parseUIntInRange(cmd, v, 0, 10, "Usage: #SMRAMPING <0..10>")) {}
-            else if (v == (uint32_t)ramping) printf("Unchanged.\n");
-            else { ramping = v; preferences.putInt(PREFERENCE_RAMPING, ramping); printf("Ramping Changed.\n"); }
-        }
-        CMD("#SMFOOTDB")
-        {
-            uint32_t v;
-            if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMFOOTDB <0..127>")) {}
-            else if (v == (uint32_t)joystickFootDeadZoneRange) printf("Unchanged.\n");
-            else { joystickFootDeadZoneRange = v; preferences.putInt(PREFERENCE_FOOTSTICK_DEADBAND, joystickFootDeadZoneRange); printf("Foot Joystick Deadband Changed.\n"); }
-        }
-        CMD("#SMDOMEDB")
-        {
-            uint32_t v;
-            if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMDOMEDB <0..127>")) {}
-            else if (v == (uint32_t)joystickDomeDeadZoneRange) printf("Unchanged.\n");
-            else { joystickDomeDeadZoneRange = v; preferences.putInt(PREFERENCE_DOMESTICK_DEADBAND, joystickDomeDeadZoneRange); printf("Dome Joystick Deadband Changed.\n"); }
-        }
-        CMD("#SMDRIVEDB")
-        {
-            uint32_t v;
-            if (!parseUIntInRange(cmd, v, 0, 127, "Usage: #SMDRIVEDB <0..127>")) {}
-            else if (v == (uint32_t)driveDeadBandRange) printf("Unchanged.\n");
-            else { driveDeadBandRange = v; preferences.putInt(PREFERENCE_DRIVE_DEADBAND, driveDeadBandRange); printf("Drive Controller Deadband Changed.\n"); }
-        }
-        CMD("#SMINVERT")
-        {
-            long v;
-            if (!parseLongArg(cmd, v)) { printf("Usage: #SMINVERT <0|1>\n"); }
-            else if ((bool)v == invertTurnDirection) printf("Unchanged.\n");
-            else { invertTurnDirection = (bool)v; preferences.putInt(PREFERENCE_INVERT_TURN_DIRECTION, invertTurnDirection);
-                printf("Invert Turn Direction %s.\n", invertTurnDirection ? "Enabled" : "Disabled"); }
-        }
-        CMD("#SMAUTOSPEED")
-        {
-            uint32_t v;
-            if (!parseUIntInRange(cmd, v, 50, 100, "Usage: #SMAUTOSPEED <50..100>")) {}
-            else if (v == (uint32_t)domeAutoSpeed) printf("Unchanged.\n");
-            else { domeAutoSpeed = v; preferences.putInt(PREFERENCE_DOME_AUTO_SPEED, domeAutoSpeed); printf("Auto Dome Speed Changed.\n"); }
-        }
-        CMD("#SMAUTOTIME")
-        {
-            uint32_t v;
-            if (!parseUIntInRange(cmd, v, 0, 8000, "Usage: #SMAUTOTIME <0..8000>")) {}
-            else if (v == (uint32_t)time360DomeTurn) printf("Unchanged.\n");
-            else { time360DomeTurn = v; preferences.putInt(PREFERENCE_DOME_DOME_TURN_TIME, time360DomeTurn); printf("Auto Dome Turn Time Changed.\n"); }
-        }
-        CMD("#SMMOTORBAUD")
-        {
-            long v;
-            if (parseLongArg(cmd, v)) {
-                if (v == motorControllerBaudRate) printf("Unchanged.\n");
-                else { motorControllerBaudRate = (int)v; preferences.putInt(PREFERENCE_MOTOR_BAUD, motorControllerBaudRate);
-                    printf("Motor Controller Serial Baud Rate Changed. Needs Reboot.\n"); }
-            } else printf("Usage: #SMMOTORBAUD <baud>\n");
-        }
-        CMD("#SMMARCBAUD")
-        {
-            long v;
-            if (parseLongArg(cmd, v)) {
-                if (v == maestroBaudRate) printf("Unchanged.\n");
-                else { maestroBaudRate = (int)v; preferences.putInt(PREFERENCE_MAESTRO_BAUD, maestroBaudRate);
-                    printf("Maestro Serial Baud Rate Changed. Needs Reboot.\n"); }
-            } else printf("Usage: #SMMARCBAUD <baud>\n");
-        }
-        CMD("#SMPLAY")
-        {
-            _skip_ws(cmd);
-
-            // If first char is a digit, treat argument as a track number
-            if (isdigit((unsigned char)*cmd)) {
-                char* endp = nullptr;
-                long track = strtol(cmd, &endp, 10);
-                if (endp != cmd && track > 0 && track <= 65535) {
-                    sShadowSound.playTrack((uint16_t)track);
-                    printf("Played track: %ld\n", track);
-                    cmd = endp; // advance past the number
-                    return;
-                } else {
-                    printf("Usage: #SMPLAY <TrackNumber | TriggerName>\n");
-                    return;
+                    *p = saved;                         // restore
                 }
             }
 
-            // Otherwise, treat it as a trigger name (existing behavior)
-            String key(cmd);
-            key.trim();
-            ShadowButtonAction* btn = ShadowButtonAction::findAction(key);
-            if (btn) {
-                btn->trigger();
-            } else {
-                printf("Trigger Not Found: %s\n", key.c_str());
-            }
+            // hard reset line buffer
+            sPos = 0;
+            sBuffer[0] = '\0';
+            continue;
         }
-        CMD("#SMSET")
-        {
-            _skip_ws(cmd);
-            char* keyp = cmd;
-            char* valp = strchr(cmd, ' ');
-            if (valp) {
-                *valp++ = '\0';
-                String key(keyp); key.trim();
-                ShadowButtonAction* btn = ShadowButtonAction::findAction(key);
-                if (btn) {
-                    String action(valp); action.trim();
-                    btn->setAction(action);
-                    printf("Trigger: %s set to %s\n", key.c_str(), action.c_str());
-                } else {
-                    printf("Trigger Not Found: %s\n", key.c_str());
-                }
-            } else {
-                printf("Usage: #SMSET <TriggerName> <Action>\n");
-            }
-        }
-        CMD("#SMNEOON")
-        {
-            neopixelEnabled = true;
-            preferences.putBool("neoenable", true);
-            refreshNeoPixels();
-            printf("NeoPixels Enabled.\n");
-        }
-        CMD("#SMNEOOFF")
-        {
-            neopixelEnabled = false;
-            preferences.putBool("neoenable", false);
-            refreshNeoPixels();
-            printf("NeoPixels Disabled.\n");
-        }
-        CMD("#SMNEOCOUNT")
-        {
-            uint32_t v;
-            if (parseUIntInRange(cmd, v, 0, 300, "Usage: #SMNEOCOUNT <count>")) {
-                neopixelCount = v;
-                preferences.putInt("neocount", neopixelCount);
-                initNeoPixels(neopixelCount);
-                refreshNeoPixels();
-                printf("NeoPixel count set to %u\n", v);
-            }
-        }
-        CMD("#SMNEOCOLOR")
-        {
-            long r, g, b;
-            if (!parseLongArg(cmd, r)) { printf("Usage: #SMNEOCOLOR <R> <G> <B>\n"); }
-            else if (!parseLongArg(cmd, g)) { printf("Usage: #SMNEOCOLOR <R> <G> <B>\n"); }
-            else if (!parseLongArg(cmd, b)) { printf("Usage: #SMNEOCOLOR <R> <G> <B>\n"); }
-            else {
-                if (r < 0) r = 0; if (r > 255) r = 255;
-                if (g < 0) g = 0; if (g > 255) g = 255;
-                if (b < 0) b = 0; if (b > 255) b = 255;
 
-                neopixelR = r; neopixelG = g; neopixelB = b;
-                preferences.putInt("neor", neopixelR);
-                preferences.putInt("neog", neopixelG);
-                preferences.putInt("neob", neopixelB);
-                refreshNeoPixels();
-                printf("NeoPixel color set to R=%ld G=%ld B=%ld\n", r, g, b);
-            }
-        }
-        // ---- One-shot random play in a range ----
-        CMD("#SMPLAYRAND")
+        // Normal character append with overflow guard
+        sLastWasCR = false;
+        if (sPos + 1 < SizeOfArray(sBuffer))
         {
-            long lo, hi;
-            if (!parseLongArg(cmd, lo)) {
-                printf("Usage: #SMPLAYRAND <min> [max]\n");
-            } else {
-                if (!parseLongArg(cmd, hi)) hi = lo;
-                if (lo < 1) lo = 1;
-                if (hi < 1) hi = 1;
-                if (lo > 255) lo = 255;
-                if (hi > 255) hi = 255;
-                if (hi < lo) { long t = lo; lo = hi; hi = t; }
-                sShadowSound.playRandomTrack((uint16_t)lo, (uint16_t)hi);
-                printf("Random track %ld–%ld triggered\n", lo, hi);
-            }
+            sBuffer[sPos++] = (char)ch;
+            sBuffer[sPos] = '\0';
         }
-        // ---- Persistent random track range (single definition) ----
-        CMD("#SMRANDTRACKS")
-        {
-            long lo, hi;
-            if (!parseLongArg(cmd, lo) || !parseLongArg(cmd, hi)) {
-                printf("Usage: #SMRANDTRACKS <min> <max>\n");
-            } else {
-                if (lo < 1) lo = 1;
-                if (hi < 1) hi = 1;
-                if (lo > 255) lo = 255;
-                if (hi > 255) hi = 255;
-                if (hi < lo) { long t = lo; lo = hi; hi = t; }
-                sShadowSound.setRandomTracks((uint16_t)lo, (uint16_t)hi);
-                preferences.putInt("sm_rand_lo", (int)lo);
-                preferences.putInt("sm_rand_hi", (int)hi);
-                printf("Random track range set to %ld–%ld\n", lo, hi);
-            }
-        }
-        // ---------- End of command chain ----------
         else
         {
-            printf("Unknown: %s\n", sBuffer);
+            // overflow: reset to avoid concatenation garbage
+            sPos = 0;
+            sBuffer[0] = '\0';
         }
-
-        // reset line buffer for next command line
-        sPos = 0;
-        sBuffer[0] = '\0';
-    }
-    else if (sPos < SizeOfArray(sBuffer)-1)
-    {
-        // accumulate chars until newline
-        sBuffer[sPos++] = (char)ch;
-        sBuffer[sPos] = '\0';
-    }
-}
+   }
 
 }
 
