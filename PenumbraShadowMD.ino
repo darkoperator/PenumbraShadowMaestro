@@ -600,6 +600,9 @@ static uint8_t gDomePeer[6] = {0};
 static bool gEspNowInited = false;
 static bool gDomeEncEnabled = false;
 static char gDomeLmkHex[33] = {0}; // 32 hex chars + NUL
+static volatile esp_now_send_status_t gLastSendStatus = ESP_NOW_SEND_FAIL;
+static volatile uint32_t gLastSendTime = 0;
+static volatile bool gHaveLastSend = false;
 
 static void ensureEspNowInit()
 {
@@ -607,6 +610,11 @@ static void ensureEspNowInit()
     WiFi.mode(WIFI_STA);
     if (esp_now_init() == ESP_OK) {
         gEspNowInited = true;
+        esp_now_register_send_cb([](const uint8_t* mac, esp_now_send_status_t status){
+            gLastSendStatus = status;
+            gLastSendTime = millis();
+            gHaveLastSend = true;
+        });
     }
 }
 
@@ -970,12 +978,12 @@ void setup()
 
         // ---- ESP-NOW Dome offload settings ----
         gDomeEspNowEnabled = preferences.getBool("dome_esp", false);
-        {
+        if (preferences.isKey("dome_peer")) {
             String peer = preferences.getString("dome_peer", "");
             if (peer.length() >= 17) parseMac(peer.c_str(), gDomePeer);
         }
         gDomeEncEnabled = preferences.getBool("dome_enc", false);
-        {
+        if (preferences.isKey("dome_lmk_hex")) {
             String lmk = preferences.getString("dome_lmk_hex", "");
             if (lmk.length() == 32) {
                 strncpy(gDomeLmkHex, lmk.c_str(), sizeof(gDomeLmkHex)-1);
@@ -1185,6 +1193,7 @@ static void printSMHelp()
     printf("#SMDOMEENC <0|1>           : Disable/Enable ESP-NOW encryption to Dome peer\n");
     printf("#SMDOMEKEY <32HEX>         : Set ESP-NOW LMK (16 bytes as 32 hex chars)\n");
     printf("#SMPAIR                    : Send pair request to Dome peer\n");
+    printf("#SMDOMESTATUS              : Show Dome ESP-NOW peer and last-send status\n");
     printf("#SMESPMAC                  : Show this ESP32's WiFi MAC (ESP-NOW)\n");
     printf("#SMDOMEESP <0|1>           : Disable/Enable Dome Maestro via ESP-NOW\n");
     printf("#SMDOMEPEER <mac>          : Set Dome ESP-NOW peer MAC (AA:BB:CC:DD:EE:FF)\n");
@@ -1360,6 +1369,31 @@ static void routeOne(char* line)
         WiFi.mode(WIFI_STA);
         esp_read_mac(mac, ESP_MAC_WIFI_STA);
         printf("ESP-NOW MAC: "); formatMac(mac);
+    }
+    CMD("#SMDOMESTATUS")
+    {
+        printf("Dome ESP-NOW Status\n");
+        printf("--------------------\n");
+        printf("Inited:        %s\n", gEspNowInited ? "Yes" : "No");
+        printf("Offload:       %s\n", gDomeEspNowEnabled ? "Enabled" : "Disabled");
+        printf("Peer MAC:      ");
+        if (gDomePeer[0]|gDomePeer[1]|gDomePeer[2]|gDomePeer[3]|gDomePeer[4]|gDomePeer[5]) formatMac(gDomePeer); else printf("(none)\n");
+        bool exists = false;
+        if (gEspNowInited && (gDomePeer[0]|gDomePeer[1]|gDomePeer[2]|gDomePeer[3]|gDomePeer[4]|gDomePeer[5])) exists = esp_now_is_peer_exist(gDomePeer);
+        printf("Peer Added:    %s\n", exists ? "Yes" : "No");
+        printf("Encryption:    %s\n", gDomeEncEnabled ? "Enabled" : "Disabled");
+        printf("LMK Set:       %s\n", (strlen(gDomeLmkHex)==32) ? "Yes" : "No");
+        if (gEspNowInited) {
+            esp_now_peer_num_t num = {};
+            if (esp_now_get_peer_num(&num) == ESP_OK) {
+                printf("Peers Total:   %u\n", (unsigned)num.total_num);
+            }
+        }
+        if (gHaveLastSend) {
+            printf("Last Send:     %s at %lu ms\n", (gLastSendStatus==ESP_NOW_SEND_SUCCESS)?"SUCCESS":"FAIL", (unsigned long)gLastSendTime);
+        } else {
+            printf("Last Send:     (none)\n");
+        }
     }
     CMD("#SMDOMEENC")
     {
@@ -1896,14 +1930,6 @@ void loop()
         }
         }
 
-        // ---- ESP-NOW Dome offload settings ----
-        gDomeEspNowEnabled = preferences.getBool("dome_esp", false);
-        String peer = preferences.getString("dome_peer", "");
-        if (peer.length() >= 17) parseMac(peer.c_str(), gDomePeer);
-        // Encryption flag and key (LMK 16 bytes as 32 hex chars)
-        // We keep the LMK as ASCII hex in prefs; parse on use in addOrUpdatePeer.
-        // Flag stored under "dome_enc" (bool) and key under "dome_lmk_hex" (string)
-        
     }
 
 // =======================================================================================

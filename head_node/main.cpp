@@ -76,6 +76,8 @@ static void printHelp()
   Serial.println("#SMENC <0|1>       : Disable/Enable ESP-NOW encryption");
   Serial.println("#SMKEY <32HEX>     : Set ESP-NOW LMK (16 bytes as 32 hex chars)");
   Serial.println("#SMPEER <mac>      : Set/add peer MAC");
+  Serial.println("#SMPEERSTATUS      : Show peer presence and details");
+  Serial.println("#SMCONFIG          : Show current configuration");
 }
 
 void setup()
@@ -126,6 +128,22 @@ void loop()
         long v = line.substring(6).toInt(); gEncEnabled = (v!=0); prefs.putBool("enc", gEncEnabled); Serial.printf("Encryption %s\n", gEncEnabled?"Enabled":"Disabled");
       } else if (line.startsWith("#SMKEY")) {
         String k = line.substring(6); k.trim(); if (k.length()==32) { strncpy(gLmkHex,k.c_str(),32); gLmkHex[32]='\0'; prefs.putString("lmk", k); Serial.println("LMK set."); } else Serial.println("Usage: #SMKEY <32HEX>");
+      } else if (line.equalsIgnoreCase("#SMPEERSTATUS")) {
+        bool exists = (gPeerMac[0]|gPeerMac[1]|gPeerMac[2]|gPeerMac[3]|gPeerMac[4]|gPeerMac[5]) && esp_now_is_peer_exist(gPeerMac);
+        Serial.println("Peer Status:");
+        Serial.print("  Configured Peer: "); if (gPeerMac[0]|gPeerMac[1]|gPeerMac[2]|gPeerMac[3]|gPeerMac[4]|gPeerMac[5]) formatMac(gPeerMac); else Serial.println("(none)");
+        Serial.printf("  Peer Added:      %s\n", exists?"Yes":"No");
+        Serial.printf("  Encryption:      %s\n", gEncEnabled?"Enabled":"Disabled");
+      } else if (line.equalsIgnoreCase("#SMCONFIG")) {
+        uint8_t mac[6]; esp_read_mac(mac, ESP_MAC_WIFI_STA);
+        Serial.println("Head Node Config:");
+        Serial.print("  WiFi MAC:        "); formatMac(mac);
+        Serial.printf("  Maestro Baud:    %d\n", maestroBaud);
+        Serial.printf("  Encryption:      %s\n", gEncEnabled?"Enabled":"Disabled");
+        Serial.printf("  LMK Set:         %s\n", (strlen(gLmkHex)==32)?"Yes":"No");
+        Serial.print("  Peer MAC:        "); if (gPeerMac[0]|gPeerMac[1]|gPeerMac[2]|gPeerMac[3]|gPeerMac[4]|gPeerMac[5]) formatMac(gPeerMac); else Serial.println("(none)");
+        bool exists = (gPeerMac[0]|gPeerMac[1]|gPeerMac[2]|gPeerMac[3]|gPeerMac[4]|gPeerMac[5]) && esp_now_is_peer_exist(gPeerMac);
+        Serial.printf("  Peer Added:      %s\n", exists?"Yes":"No");
       } else if (line.startsWith("#SMPEER")) {
         String m = line.substring(7); m.trim(); if (parseMac(m.c_str(), gPeerMac)) { prefs.putString("peer", m); esp_now_peer_info_t p={}; memcpy(p.peer_addr,gPeerMac,6); p.channel=0; p.encrypt=gEncEnabled; if(gEncEnabled){uint8_t lmk[16]; if(parseHexKey(gLmkHex,lmk)) memcpy(p.lmk,lmk,16); else p.encrypt=false;} esp_now_del_peer(gPeerMac); esp_now_add_peer(&p); Serial.print("Peer set: "); formatMac(gPeerMac);} else Serial.println("Usage: #SMPEER <AA:BB:CC:DD:EE:FF>");
       } else if (line.length()) {
