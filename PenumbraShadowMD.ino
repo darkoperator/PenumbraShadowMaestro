@@ -349,6 +349,9 @@ int maestroBaudRate = DEFAULT_MAESTRO_BAUD;
 #include <core/StringUtils.h>
 
 #include <PS3BT.h>
+#include <WiFi.h>
+#include <esp_now.h>
+#include "EspNowProtocol.h"
 
 #include <usbhub.h>
 
@@ -492,6 +495,10 @@ static inline void maestroRestartAtSub(Stream& port, uint8_t subIndex)
     port.write(pkt, sizeof(pkt));
 }
 
+// Forward declarations for ESP-NOW Dome offload used below
+extern bool gDomeEspNowEnabled;
+static bool sendDomeViaEspNow(uint8_t subIndex);
+
 // Simple, non-blocking queueing for Maestro subroutine calls.
 // Avoids overlapping DM/BM sequences by spacing calls by a cooldown.
 static uint32_t kMaestroCooldownMs = 400;      // default spacing between sub restarts
@@ -533,6 +540,10 @@ static inline void _sendBodyNow(uint8_t subIndex)
 
 void sendDomeMaestroSequence(uint8_t subIndex)
 {
+    // If configured to offload Dome Maestro via ESP-NOW, send to peer instead.
+    if (gDomeEspNowEnabled && sendDomeViaEspNow(subIndex)) {
+        return;
+    }
     uint32_t now = millis();
     if ((int32_t)(now - domeSubBusyUntil) >= 0 && !maestroIsScriptRunning(MAESTRO_SERIAL)) {
         _sendDomeNow(subIndex);
@@ -582,6 +593,87 @@ int serialLatency = 25;   //This is a delay factor in ms to prevent queueing of 
 int marcDuinoButtonCounter = 0;
 int speedToggleButtonCounter = 0;
 int domeToggleButtonCounter = 0;
+
+// ----------------------- ESP-NOW (optional Dome Maestro offload) -----------------------
+bool gDomeEspNowEnabled = false;
+static uint8_t gDomePeer[6] = {0};
+static bool gEspNowInited = false;
+static bool gDomeEncEnabled = false;
+static char gDomeLmkHex[33] = {0}; // 32 hex chars + NUL
+
+static void ensureEspNowInit()
+{
+    if (gEspNowInited) return;
+    WiFi.mode(WIFI_STA);
+    if (esp_now_init() == ESP_OK) {
+        gEspNowInited = true;
+    }
+}
+
+static bool parseMac(const char* s, uint8_t mac[6])
+{
+    if (!s) return false;
+    int vals[6];
+    if (sscanf(s, "%x:%x:%x:%x:%x:%x", &vals[0], &vals[1], &vals[2], &vals[3], &vals[4], &vals[5]) != 6)
+        return false;
+    for (int i = 0; i < 6; ++i) mac[i] = (uint8_t)vals[i];
+    return true;
+}
+
+static void formatMac(const uint8_t mac[6])
+{
+    printf("%02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+static bool hexNibble(char c, uint8_t& v)
+{
+    if (c>='0' && c<='9') { v = (uint8_t)(c - '0'); return true; }
+    c = (char)toupper((unsigned char)c);
+    if (c>='A' && c<='F') { v = (uint8_t)(10 + c - 'A'); return true; }
+    return false;
+}
+
+static bool parseHexKey(const char* hex, uint8_t out[16])
+{
+    if (!hex) return false;
+    size_t n = strlen(hex);
+    if (n != 32) return false;
+    for (int i = 0; i < 16; ++i) {
+        uint8_t hi, lo;
+        if (!hexNibble(hex[2*i], hi) || !hexNibble(hex[2*i+1], lo)) return false;
+        out[i] = (uint8_t)((hi<<4) | lo);
+    }
+    return true;
+}
+
+static bool addOrUpdatePeer(const uint8_t mac[6])
+{
+    ensureEspNowInit();
+    if (!gEspNowInited) return false;
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, mac, 6);
+    peer.channel = 0; // current channel
+    peer.encrypt = gDomeEncEnabled;
+    if (peer.encrypt) {
+        uint8_t lmk[16];
+        if (parseHexKey(gDomeLmkHex, lmk)) memcpy(peer.lmk, lmk, 16);
+        else peer.encrypt = false; // disable if key invalid
+    }
+    esp_now_del_peer(mac); // remove if exists
+    return esp_now_add_peer(&peer) == ESP_OK;
+}
+
+static bool sendDomeViaEspNow(uint8_t subIndex)
+{
+    if (!gDomeEspNowEnabled) return false;
+    if (gDomePeer[0]==0 && gDomePeer[1]==0 && gDomePeer[2]==0 && gDomePeer[3]==0 && gDomePeer[4]==0 && gDomePeer[5]==0) return false;
+    ensureEspNowInit();
+    if (!gEspNowInited) return false;
+    addOrUpdatePeer(gDomePeer);
+    SmNowMsg msg; msg.type = kSmNowType_DomeSub; msg.subIndex = subIndex;
+    esp_now_send(gDomePeer, (const uint8_t*)&msg, sizeof(msg));
+    return true;
+}
 
 #ifdef USE_SABERTOOTH_PACKET_SERIAL
 SabertoothDriver FootMotorImpl(FOOT_MOTOR_ADDR, MOTOR_SERIAL);
@@ -875,6 +967,21 @@ void setup()
                 }
             }
         }
+
+        // ---- ESP-NOW Dome offload settings ----
+        gDomeEspNowEnabled = preferences.getBool("dome_esp", false);
+        {
+            String peer = preferences.getString("dome_peer", "");
+            if (peer.length() >= 17) parseMac(peer.c_str(), gDomePeer);
+        }
+        gDomeEncEnabled = preferences.getBool("dome_enc", false);
+        {
+            String lmk = preferences.getString("dome_lmk_hex", "");
+            if (lmk.length() == 32) {
+                strncpy(gDomeLmkHex, lmk.c_str(), sizeof(gDomeLmkHex)-1);
+                gDomeLmkHex[32] = '\0';
+            }
+        }
     }
 #endif
 
@@ -1072,6 +1179,15 @@ static void printSMHelp()
     printf("#SMAUTOTIME <2000..8000>   : Auto dome turn time (ms)\n");
     printf("#SMMARCBAUD <baud>         : Maestro serial baud (needs reboot)\n");
     printf("#SMMOTORBAUD <baud>        : Motor controller baud (needs reboot)\n");
+    printf("#SMESPMAC                  : Show this ESP32's WiFi MAC (ESP-NOW)\n");
+    printf("#SMDOMEESP <0|1>           : Disable/Enable Dome Maestro via ESP-NOW\n");
+    printf("#SMDOMEPEER <mac>          : Set Dome ESP-NOW peer MAC (AA:BB:CC:DD:EE:FF)\n");
+    printf("#SMDOMEENC <0|1>           : Disable/Enable ESP-NOW encryption to Dome peer\n");
+    printf("#SMDOMEKEY <32HEX>         : Set ESP-NOW LMK (16 bytes as 32 hex chars)\n");
+    printf("#SMPAIR                    : Send pair request to Dome peer\n");
+    printf("#SMESPMAC                  : Show this ESP32's WiFi MAC (ESP-NOW)\n");
+    printf("#SMDOMEESP <0|1>           : Disable/Enable Dome Maestro via ESP-NOW\n");
+    printf("#SMDOMEPEER <mac>          : Set Dome ESP-NOW peer MAC (AA:BB:CC:DD:EE:FF)\n");
     printf("\n");
     printf("Examples:\n");
     printf(" - Bind button to Dome sequence:         #SMSET FTbtnUP_MD \"DM58\"\n");
@@ -1226,6 +1342,10 @@ static void routeOne(char* line)
 
         // Serial
         printf("Maestro Baud:     %6d (#SMMARCBAUD)\n",  maestroBaudRate);
+        printf("Dome Maestro:     %s\n", gDomeEspNowEnabled ? "ESP-NOW offload" : "Local serial");
+        if (gDomeEspNowEnabled) {
+            printf("Dome Peer:        "); formatMac(gDomePeer);
+        }
         printf("Motor Baud:       %6d (#SMMOTORBAUD)\n", motorControllerBaudRate);
 
         // NeoPixels
@@ -1233,6 +1353,79 @@ static void routeOne(char* line)
         printf("NeoPixel Count:      %3d (#SMNEOCOUNT)\n", neopixelCount);
         printf("NeoPixel Color:   R=%3d G=%3d B=%3d (#SMNEOCOLOR <r> <g> <b>)\n",
                neopixelR, neopixelG, neopixelB);
+    }
+    CMD("#SMESPMAC")
+    {
+        uint8_t mac[6];
+        WiFi.mode(WIFI_STA);
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+        printf("ESP-NOW MAC: "); formatMac(mac);
+    }
+    CMD("#SMDOMEENC")
+    {
+        long v;
+        if (!parseLongArg(cmd, v)) {
+            printf("Usage: #SMDOMEENC <0|1>\n");
+        } else {
+            gDomeEncEnabled = (v != 0);
+            preferences.putBool("dome_enc", gDomeEncEnabled);
+            printf("Dome ESP-NOW Encryption %s\n", gDomeEncEnabled ? "Enabled" : "Disabled");
+        }
+    }
+    CMD("#SMDOMEKEY")
+    {
+        // Set 16-byte LMK as 32 hex chars
+        if (*cmd == 0) {
+            printf("Usage: #SMDOMEKEY <32-hex-chars>\n");
+        } else {
+            String key = String(cmd); key.trim();
+            if (key.length() == 32) {
+                strncpy(gDomeLmkHex, key.c_str(), sizeof(gDomeLmkHex)-1);
+                gDomeLmkHex[32] = '\0';
+                preferences.putString("dome_lmk_hex", key);
+                printf("Dome ESP-NOW LMK set.\n");
+            } else {
+                printf("Usage: #SMDOMEKEY <32-hex-chars>\n");
+            }
+        }
+    }
+    CMD("#SMPAIR")
+    {
+        // Send a simple pair message to current Dome peer (adds us on the head node)
+        if (gDomePeer[0]==0 && gDomePeer[1]==0 && gDomePeer[2]==0 && gDomePeer[3]==0 && gDomePeer[4]==0 && gDomePeer[5]==0) {
+            printf("No Dome peer set. Use #SMDOMEPEER <mac> first.\n");
+        } else {
+            ensureEspNowInit(); addOrUpdatePeer(gDomePeer);
+            SmNowMsg msg; msg.type = 100; msg.subIndex = 0; // Pair request
+            esp_now_send(gDomePeer, (const uint8_t*)&msg, sizeof(msg));
+            printf("Pair request sent.\n");
+        }
+    }
+    CMD("#SMDOMEESP")
+    {
+        long v;
+        if (!parseLongArg(cmd, v)) {
+            printf("Usage: #SMDOMEESP <0|1>\n");
+        } else {
+            gDomeEspNowEnabled = (v != 0);
+            preferences.putBool("dome_esp", gDomeEspNowEnabled);
+            printf("Dome ESP-NOW %s\n", gDomeEspNowEnabled ? "Enabled" : "Disabled");
+        }
+    }
+    CMD("#SMDOMEPEER")
+    {
+        // Set or show Dome peer MAC
+        if (*cmd == 0) {
+            printf("Dome Peer: "); formatMac(gDomePeer);
+        } else {
+            char* macstr = cmd; // already trimmed
+            if (parseMac(macstr, gDomePeer)) {
+                preferences.putString("dome_peer", String(macstr));
+                printf("Dome Peer set: "); formatMac(gDomePeer);
+            } else {
+                printf("Usage: #SMDOMEPEER <AA:BB:CC:DD:EE:FF>\n");
+            }
+        }
     }
     CMD("#SMCARD")
     {
@@ -1298,6 +1491,15 @@ static void routeOne(char* line)
         printf(neopixelEnabled ? "#SMNEOON\n" : "#SMNEOOFF\n");
         printf("#SMNEOCOUNT %d\n", neopixelCount);
         printf("#SMNEOCOLOR %u %u %u\n", (unsigned)neopixelR, (unsigned)neopixelG, (unsigned)neopixelB);
+
+        // Dome ESP-NOW offload
+        printf("#SMDOMEESP %d\n", gDomeEspNowEnabled ? 1 : 0);
+        printf("#SMDOMEPEER %02X:%02X:%02X:%02X:%02X:%02X\n",
+               gDomePeer[0], gDomePeer[1], gDomePeer[2], gDomePeer[3], gDomePeer[4], gDomePeer[5]);
+        printf("#SMDOMEENC %d\n", gDomeEncEnabled ? 1 : 0);
+        if (strlen(gDomeLmkHex) == 32) {
+            printf("#SMDOMEKEY %s\n", gDomeLmkHex);
+        }
 
         // Dump triggers as SMSET commands
         ShadowButtonAction::dumpActions();
@@ -1692,9 +1894,17 @@ void loop()
             sPos = 0;
             sBuffer[0] = '\0';
         }
-   }
+        }
 
-}
+        // ---- ESP-NOW Dome offload settings ----
+        gDomeEspNowEnabled = preferences.getBool("dome_esp", false);
+        String peer = preferences.getString("dome_peer", "");
+        if (peer.length() >= 17) parseMac(peer.c_str(), gDomePeer);
+        // Encryption flag and key (LMK 16 bytes as 32 hex chars)
+        // We keep the LMK as ASCII hex in prefs; parse on use in addOrUpdatePeer.
+        // Flag stored under "dome_enc" (bool) and key under "dome_lmk_hex" (string)
+        
+    }
 
 // =======================================================================================
 //           footDrive Motor Control Section

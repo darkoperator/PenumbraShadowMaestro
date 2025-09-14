@@ -85,6 +85,7 @@ See [Penumbra wiring diagram](https://user-images.githubusercontent.com/16616950
 - Run a sequence with random range: `#SMSET FTbtnUP_MD "DM58;S R 10 25"`
 - Play a track immediately: `#SMPLAY 42`
  - Play a track immediately: `#SMPLAY 42` (DY supports up to 65535 → 00042.mp3)
+ - Play a track immediately: `#SMPLAY 42` (DY supports up to 65535 → 00042.mp3)
 - One-shot random from range: `#SMPLAYRAND 10 25` (or bind: `#SMSET btnX "S R 10 25"`)
 - Persistent random range + enable: `#SMRANDTRACKS 10 25` then `#SMRAND1`
 
@@ -94,7 +95,7 @@ See [Penumbra wiring diagram](https://user-images.githubusercontent.com/16616950
 | `#SMSOUND0` | Disable sound |
 | `#SMSOUND1` | Use MP3 Trigger |
 | `#SMSOUND2` | Use DFPlayer Mini |
-| `#SMSOUND3` | Use HCR Vocalizer |
+| `#SMSOUND3` | Use DY-SV5W |
 | `#SMVOLUME0..1000` | Set volume (0 = mute, 1000 = max) |
 | `#SMSTARTUP<n>` | Set startup track |
 | `#SMRANDMIN<n>` | Min ms between random sounds |
@@ -103,6 +104,7 @@ See [Penumbra wiring diagram](https://user-images.githubusercontent.com/16616950
 | `#SMRAND1` | Enable random playback |
 | `#SMRANDTRACKS a b` | (New) limit random sounds to tracks *a..b* |
 | `#SMCONFIG` | Show drive/sound config |
+| `#SMCARD` | Check audio/card status (DY sends test <P00001>) |
 | `#SMCARD` | Check audio/card status (DY sends test <P00001>) |
 
 ### NeoPixels
@@ -129,6 +131,12 @@ See [Penumbra wiring diagram](https://user-images.githubusercontent.com/16616950
 | `#SMAUTOTIME<n>` | Dome 360° time (ms) |
 | `#SMMOTORBAUD<n>` | Motor serial baud |
 | `#SMMARCBAUD<n>` | Maestro serial baud |
+| `#SMESPMAC` | Show this ESP32 WiFi MAC (ESP-NOW) |
+| `#SMDOMEESP<0|1>` | Disable/Enable Dome Maestro via ESP-NOW |
+| `#SMDOMEPEER <mac>` | Set Dome ESP-NOW peer MAC |
+| `#SMDOMEENC<0|1>` | Disable/Enable ESP-NOW encryption with Dome peer |
+| `#SMDOMEKEY <32HEX>` | Set ESP-NOW LMK (16 bytes as 32 hex chars) |
+| `#SMPAIR` | Send simple pair request to Dome peer |
 
 ---
 
