@@ -145,7 +145,41 @@ void loop()
         bool exists = (gPeerMac[0]|gPeerMac[1]|gPeerMac[2]|gPeerMac[3]|gPeerMac[4]|gPeerMac[5]) && esp_now_is_peer_exist(gPeerMac);
         Serial.printf("  Peer Added:      %s\n", exists?"Yes":"No");
       } else if (line.startsWith("#SMPEER")) {
-        String m = line.substring(7); m.trim(); if (parseMac(m.c_str(), gPeerMac)) { prefs.putString("peer", m); esp_now_peer_info_t p={}; memcpy(p.peer_addr,gPeerMac,6); p.channel=0; p.encrypt=gEncEnabled; if(gEncEnabled){uint8_t lmk[16]; if(parseHexKey(gLmkHex,lmk)) memcpy(p.lmk,lmk,16); else p.encrypt=false;} esp_now_del_peer(gPeerMac); esp_now_add_peer(&p); Serial.print("Peer set: "); formatMac(gPeerMac);} else Serial.println("Usage: #SMPEER <AA:BB:CC:DD:EE:FF>");
+        String m = line.substring(7);
+        m.trim();
+
+        // Try to parse the MAC address
+        if (parseMac(m.c_str(), gPeerMac)) {
+            // Save peer MAC to preferences for persistence
+            prefs.putString("peer", m);
+            
+            // Initialize ESP-NOW peer info structure
+            esp_now_peer_info_t p = {};
+            memcpy(p.peer_addr, gPeerMac, 6);  // Copy MAC address to peer info
+            p.channel = 0;                      // Use current channel (0 = auto)
+            p.encrypt = gEncEnabled;            // Set encryption based on global flag
+            
+            // If encryption is enabled, set up the Local Master Key (LMK)
+            if (gEncEnabled) {
+                uint8_t lmk[16];
+                if (parseHexKey(gLmkHex, lmk)) {
+                    memcpy(p.lmk, lmk, 16);     // Copy parsed key to peer info
+                } else {
+                    p.encrypt = false;          // Disable encryption if key parsing failed
+                }
+            }
+            
+            // Remove existing peer (if any) and add the new one
+            esp_now_del_peer(gPeerMac);         // Clean up existing peer entry
+            esp_now_add_peer(&p);               // Add new peer with updated info
+            
+            // Confirm peer was set successfully
+            Serial.print("Peer set: ");
+            formatMac(gPeerMac);
+        } else {
+            // Show usage if MAC address parsing failed
+            Serial.println("Usage: #SMPEER <AA:BB:CC:DD:EE:FF>");
+        }
       } else if (line.length()) {
         Serial.printf("Unknown: %s\n", line.c_str());
         printHelp();
